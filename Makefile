@@ -53,7 +53,7 @@ build: setup
 # Build locally with stable Apple Development signing when available.
 local: check setup
 	@echo "Building VoiceInk for local use (no Apple Developer certificate required)..."
-	@rm -rf "$(LOCAL_DERIVED_DATA)"
+	# @rm -rf "$(LOCAL_DERIVED_DATA)"
 	@SIGNING_IDENTITY="$(LOCAL_CODESIGN_IDENTITY)"; \
 	if [ -z "$$SIGNING_IDENTITY" ]; then \
 		SIGNING_IDENTITIES=$$(security find-identity -v -p codesigning 2>/dev/null | awk '/"Apple Development: / { print $$2 }'); \
