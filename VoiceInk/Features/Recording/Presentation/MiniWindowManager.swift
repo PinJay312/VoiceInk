@@ -14,21 +14,36 @@ class MiniWindowManager {
         engine: VoiceInkEngine,
         recorder: Recorder,
         assistantSession: AssistantSession,
+        panelStyleProvider: @escaping () -> RecorderPanelStyle = { RecorderPanelStyle.stored },
         onRecordButtonTapped: @escaping () -> Void,
         onCloseTapped: @escaping () -> Void,
         onAssistantFollowUp: @escaping (String) -> Void
     ) {
         self.makeView = {
-            AnyView(
-                MiniRecorderView(
-                    stateProvider: engine,
-                    recorder: recorder,
-                    assistantSession: assistantSession,
-                    onRecordButtonTapped: onRecordButtonTapped,
-                    onCloseTapped: onCloseTapped,
-                    onAssistantFollowUp: onAssistantFollowUp
+            let style = panelStyleProvider()
+            if style == .typeless {
+                return AnyView(
+                    TypelessRecorderView(
+                        stateProvider: engine,
+                        recorder: recorder,
+                        assistantSession: assistantSession,
+                        onRecordButtonTapped: onRecordButtonTapped,
+                        onCloseTapped: onCloseTapped,
+                        onAssistantFollowUp: onAssistantFollowUp
+                    )
                 )
-            )
+            } else {
+                return AnyView(
+                    MiniRecorderView(
+                        stateProvider: engine,
+                        recorder: recorder,
+                        assistantSession: assistantSession,
+                        onRecordButtonTapped: onRecordButtonTapped,
+                        onCloseTapped: onCloseTapped,
+                        onAssistantFollowUp: onAssistantFollowUp
+                    )
+                )
+            }
         }
     }
 

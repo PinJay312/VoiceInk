@@ -5,23 +5,26 @@ import SwiftUI
 import os
 
 enum RecorderPanelStyle: String, CaseIterable, Identifiable {
-    case notch
+    case typeless
     case mini
+    case notch
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
-        case .notch:
-            return String(localized: "Notch")
+        case .typeless:
+            return "Typeless"
         case .mini:
             return String(localized: "Mini")
+        case .notch:
+            return String(localized: "Notch")
         }
     }
 
     static var stored: RecorderPanelStyle {
-        let rawValue = UserDefaults.standard.string(forKey: "RecorderType") ?? RecorderPanelStyle.mini.rawValue
-        return RecorderPanelStyle(rawValue: rawValue) ?? .mini
+        let rawValue = UserDefaults.standard.string(forKey: "RecorderType") ?? RecorderPanelStyle.typeless.rawValue
+        return RecorderPanelStyle(rawValue: rawValue) ?? .typeless
     }
 }
 
@@ -43,7 +46,7 @@ class RecorderUIManager: ObservableObject, RecorderPanelPresenting {
 
     var recorderType: String {
         get { recorderPanelStyle.rawValue }
-        set { recorderPanelStyle = RecorderPanelStyle(rawValue: newValue) ?? .mini }
+        set { recorderPanelStyle = RecorderPanelStyle(rawValue: newValue) ?? .typeless }
     }
 
     @Published var isRecorderPanelVisible = false {
@@ -114,12 +117,13 @@ class RecorderUIManager: ObservableObject, RecorderPanelPresenting {
                 )
             }
             shown = notchWindowManager?.show() ?? false
-        case .mini:
+        case .mini, .typeless:
             if miniWindowManager == nil {
                 miniWindowManager = MiniWindowManager(
                     engine: engine,
                     recorder: recorder,
                     assistantSession: engine.assistantSession,
+                    panelStyleProvider: { [weak self] in self?.recorderPanelStyle ?? .stored },
                     onRecordButtonTapped: { [weak self] in
                         Task { @MainActor in
                             await self?.toggleRecorderPanel()
@@ -157,7 +161,7 @@ class RecorderUIManager: ObservableObject, RecorderPanelPresenting {
         switch recorderPanelStyle {
         case .notch:
             notchWindowManager?.hide()
-        case .mini:
+        case .mini, .typeless:
             miniWindowManager?.hide()
         }
     }
@@ -205,7 +209,7 @@ class RecorderUIManager: ObservableObject, RecorderPanelPresenting {
         case .notch:
             notchWindowManager?.destroyWindow()
             notchWindowManager = nil
-        case .mini:
+        case .mini, .typeless:
             miniWindowManager?.destroyWindow()
             miniWindowManager = nil
         }

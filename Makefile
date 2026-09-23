@@ -86,9 +86,10 @@ local: check setup
 		build
 	@APP_PATH="$(LOCAL_DERIVED_DATA)/Build/Products/Release/VoiceInk.app" && \
 	if [ -d "$$APP_PATH" ]; then \
-		echo "Copying VoiceInk.app to ~/Downloads..."; \
-		rm -rf "$$HOME/Downloads/VoiceInk.app"; \
 		ditto "$$APP_PATH" "$$HOME/Downloads/VoiceInk.app"; \
+		if [ -n "$$SIGNING_IDENTITY" ] && [ "$$SIGNING_IDENTITY" != "-" ]; then \
+			codesign --force --deep --sign "$$SIGNING_IDENTITY" --entitlements "$(CURDIR)/VoiceInk/VoiceInk.local.entitlements" "$$HOME/Downloads/VoiceInk.app"; \
+		fi; \
 		xattr -cr "$$HOME/Downloads/VoiceInk.app"; \
 		echo ""; \
 		echo "Build complete! App saved to: ~/Downloads/VoiceInk.app"; \
