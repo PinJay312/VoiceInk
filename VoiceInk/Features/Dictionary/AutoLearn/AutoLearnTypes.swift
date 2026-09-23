@@ -173,10 +173,12 @@ enum AutoLearnReviewSchedule: String, CaseIterable, Identifiable {
 
 enum AutoLearnLimits {
     static let observationDurationNanoseconds: UInt64 = 60_000_000_000
-    static let verificationDelayNanoseconds: UInt64 = 120_000_000
+    static let verificationDelayNanoseconds: UInt64 = 250_000_000
+    static let samplingIntervalNanoseconds: UInt64 = 400_000_000
+    static let quiescenceDelayNanoseconds: UInt64 = 2_500_000_000
     static let focusChangeGraceNanoseconds: UInt64 = 250_000_000
-    static let accessibilityTimeoutSeconds: Float = 0.20
-    static let captureAccessibilityTimeoutSeconds: Float = 0.10
+    static let accessibilityTimeoutSeconds: Float = 0.50
+    static let captureAccessibilityTimeoutSeconds: Float = 0.50
     static let maximumFieldUTF16Length = 100_000
     static let maximumPastedCharacters = 12_000
     static let maximumDiffSegments = 2_048

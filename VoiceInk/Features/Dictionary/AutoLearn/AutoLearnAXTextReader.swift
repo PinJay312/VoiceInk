@@ -33,7 +33,6 @@ final class AutoLearnAXTextReader {
     private static let stringForMarkerRangeAttribute = "AXStringForTextMarkerRange" as CFString
 
     private var manualAccessibilityLastEnabledAt: [pid_t: UInt64] = [:]
-    private var manualAccessibilityUnsupportedUntil: [pid_t: UInt64] = [:]
     private var manualAccessibilityPreviousValue: [pid_t: Bool] = [:]
 
     func focusedReadings(processID: pid_t) -> [AutoLearnAXTextReading] {
@@ -47,6 +46,18 @@ final class AutoLearnAXTextReader {
         var candidates: [(element: AXUIElement, source: String)] = []
         if let appFocused = copyElement(kAXFocusedUIElementAttribute as CFString, from: appElement) {
             appendUnique(appFocused, source: "application-focus", to: &candidates)
+        }
+
+        if let focusedWindow = copyElement(kAXFocusedWindowAttribute as CFString, from: appElement) {
+            if let windowFocused = copyElement(kAXFocusedUIElementAttribute as CFString, from: focusedWindow) {
+                appendUnique(windowFocused, source: "window-focus", to: &candidates)
+            }
+        }
+
+        if let mainWindow = copyElement(kAXMainWindowAttribute as CFString, from: appElement) {
+            if let mainWindowFocused = copyElement(kAXFocusedUIElementAttribute as CFString, from: mainWindow) {
+                appendUnique(mainWindowFocused, source: "main-window-focus", to: &candidates)
+            }
         }
 
         let systemWide = AXUIElementCreateSystemWide()
@@ -67,7 +78,6 @@ final class AutoLearnAXTextReader {
             )
             readings.append(contentsOf: candidateReadings)
         }
-        if readings.isEmpty { restoreWebAccessibility(processID: processID, appElement: appElement) }
         return readings
     }
 
@@ -80,7 +90,21 @@ final class AutoLearnAXTextReader {
     private func isEditable(_ element: AXUIElement) -> Bool {
         if let value = copyBool("AXEditable" as CFString, from: element) { return value }
         let role = copyString(kAXRoleAttribute as CFString, from: element) ?? ""
-        return role == kAXTextFieldRole || role == kAXTextAreaRole || role == kAXComboBoxRole
+        if role == kAXTextFieldRole || role == kAXTextAreaRole || role == kAXComboBoxRole {
+            return true
+        }
+        let subrole = copyString(kAXSubroleAttribute as CFString, from: element) ?? ""
+        if subrole == "AXContentEditable" || subrole == "AXRichContent" {
+            return true
+        }
+        let attributes = attributeNames(of: element)
+        if attributes.contains(kAXSelectedTextRangeAttribute as String)
+            || attributes.contains("AXInsertionPointLineNumber")
+            || attributes.contains(Self.selectedMarkerRangeAttribute as String)
+        {
+            return true
+        }
+        return false
     }
 
     func textValue(from element: AXUIElement) -> AutoLearnAXTextValue? {
@@ -101,13 +125,31 @@ final class AutoLearnAXTextReader {
             return AutoLearnAXTextValue(text: text, source: "string-for-range")
         }
 
-        guard let value = copyString(kAXValueAttribute as CFString, from: element),
+        if let value = copyString(kAXValueAttribute as CFString, from: element),
             value.utf16.count <= AutoLearnLimits.maximumFieldUTF16Length
-        else {
-            guard let markerSnapshot = markerSnapshot(from: element) else { return nil }
+        {
+            return AutoLearnAXTextValue(text: value, source: "value")
+        }
+
+        if parameterizedAttributes.contains(kAXAttributedStringForRangeParameterizedAttribute as String),
+            attributes.contains(kAXNumberOfCharactersAttribute as String),
+            let documentLength = copyInteger(kAXNumberOfCharactersAttribute as CFString, from: element),
+            documentLength >= 0,
+            documentLength <= AutoLearnLimits.maximumFieldUTF16Length,
+            let attrText = copyAttributedStringForRange(
+                NSRange(location: 0, length: documentLength),
+                from: element
+            ),
+            documentLength == 0 || !attrText.isEmpty
+        {
+            return AutoLearnAXTextValue(text: attrText, source: "attributed-string-for-range")
+        }
+
+        if let markerSnapshot = markerSnapshot(from: element) {
             return AutoLearnAXTextValue(text: markerSnapshot.text, source: "text-markers")
         }
-        return AutoLearnAXTextValue(text: value, source: "value")
+
+        return nil
     }
 
     private func makeReadings(
@@ -222,9 +264,8 @@ final class AutoLearnAXTextReader {
         appElement: AXUIElement
     ) {
         let now = DispatchTime.now().uptimeNanoseconds
-        if let until = manualAccessibilityUnsupportedUntil[processID], now < until { return }
         if let lastEnabledAt = manualAccessibilityLastEnabledAt[processID],
-            now - lastEnabledAt < 1_000_000_000
+            now - lastEnabledAt < 500_000_000
         {
             return
         }
@@ -232,19 +273,16 @@ final class AutoLearnAXTextReader {
         guard let previousValue = copyBool(Self.manualAccessibilityAttribute, from: appElement) else {
             return
         }
-        manualAccessibilityPreviousValue[processID] = previousValue
+        if manualAccessibilityPreviousValue[processID] == nil {
+            manualAccessibilityPreviousValue[processID] = previousValue
+        }
         let result = AXUIElementSetAttributeValue(
             appElement,
             Self.manualAccessibilityAttribute,
             kCFBooleanTrue
         )
-        switch result {
-        case .success:
+        if result == .success {
             manualAccessibilityLastEnabledAt[processID] = now
-        case .attributeUnsupported, .notImplemented:
-            manualAccessibilityUnsupportedUntil[processID] = now + 60_000_000_000
-        default:
-            break
         }
     }
 
@@ -345,6 +383,25 @@ final class AutoLearnAXTextReader {
         }
         if let attributedText = value as? NSAttributedString {
             return attributedText.string
+        }
+        return nil
+    }
+
+    private func copyAttributedStringForRange(_ range: NSRange, from element: AXUIElement) -> String? {
+        var cfRange = CFRange(location: range.location, length: range.length)
+        guard let rangeValue = AXValueCreate(.cfRange, &cfRange) else { return nil }
+        guard let value = copyOpaqueParameterized(
+            kAXAttributedStringForRangeParameterizedAttribute as CFString,
+            parameter: rangeValue,
+            from: element
+        ) else {
+            return nil
+        }
+        if let attributedText = value as? NSAttributedString {
+            return attributedText.string
+        }
+        if let text = value as? String {
+            return text
         }
         return nil
     }

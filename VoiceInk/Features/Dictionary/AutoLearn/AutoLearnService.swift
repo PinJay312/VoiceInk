@@ -20,6 +20,9 @@ actor AutoLearnService {
     private var activeProcessID: pid_t?
     private var deadlineTask: Task<Void, Never>?
     private var focusFinalizationTask: Task<Void, Never>?
+    private var activeSamplingTask: Task<Void, Never>?
+    private var lastObservedNonEmptyText: String?
+    private var lastObservedEditTimestamp: UInt64?
     private var reviewTask: Task<Void, Never>?
     private var reviewGeneration: UInt64 = 0
     private var claimedCandidateIDs = Set<UUID>()
@@ -231,6 +234,8 @@ actor AutoLearnService {
         deadlineTask = nil
         focusFinalizationTask?.cancel()
         focusFinalizationTask = nil
+        activeSamplingTask?.cancel()
+        activeSamplingTask = nil
         focusObserver.stop()
         activeToken = nil
         activeGeneration = nil
@@ -285,11 +290,28 @@ actor AutoLearnService {
             AutoLearnSettings.isEnabled
         else { return }
 
-        guard let token = await accessibilityRuntime.capturePastedText(
+        var token: AutoLearnPasteToken?
+        let retryIntervalNanoseconds: UInt64 = 100_000_000
+        let maxAttempts = 3
+
+        for attempt in 1...maxAttempts {
+            if let captured = await accessibilityRuntime.capturePastedText(
                 text: text,
                 processID: processID
-            )
-        else { return }
+            ) {
+                token = captured
+                break
+            }
+
+            guard attempt < maxAttempts,
+                await sleep(nanoseconds: retryIntervalNanoseconds),
+                !Task.isCancelled,
+                lifecycleGeneration == generation,
+                AutoLearnSettings.isEnabled
+            else { break }
+        }
+
+        guard let token else { return }
 
         guard lifecycleGeneration == generation,
             !Task.isCancelled,
@@ -302,6 +324,11 @@ actor AutoLearnService {
         activeToken = token
         activeGeneration = generation
         activeProcessID = processID
+        lastObservedNonEmptyText = nil
+        lastObservedEditTimestamp = nil
+
+        startActiveSampling(token: token, generation: generation)
+
         focusObserver.start(processID: processID, token: token) { token in
             Task {
                 await AutoLearnService.shared.focusMayHaveChanged(token: token)
@@ -313,6 +340,72 @@ actor AutoLearnService {
         )
     }
 
+    private func startActiveSampling(token: AutoLearnPasteToken, generation: UInt64) {
+        activeSamplingTask?.cancel()
+        activeSamplingTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                guard await self.sleep(nanoseconds: AutoLearnLimits.samplingIntervalNanoseconds),
+                    !Task.isCancelled,
+                    await self.isValidActiveSession(token: token, generation: generation)
+                else { break }
+
+                let concluded = await self.performSamplingTick(token: token, generation: generation)
+                if concluded {
+                    break
+                }
+            }
+        }
+    }
+
+    private func isValidActiveSession(token: AutoLearnPasteToken, generation: UInt64) -> Bool {
+        activeToken == token && activeGeneration == generation && AutoLearnSettings.isEnabled
+    }
+
+    private func performSamplingTick(token: AutoLearnPasteToken, generation: UInt64) async -> Bool {
+        guard isValidActiveSession(token: token, generation: generation) else {
+            return true
+        }
+
+        guard let liveText = await accessibilityRuntime.currentFieldText(token: token) else {
+            return false
+        }
+
+        let trimmedLive = liveText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let now = DispatchTime.now().uptimeNanoseconds
+
+        // Submit detection:
+        // If the user previously had modified text in the field, and now the field was cleared (empty),
+        // it means the user submitted/sent the message via Enter!
+        if trimmedLive.isEmpty, let lastText = lastObservedNonEmptyText, !lastText.isEmpty {
+            logger.notice("Auto Learn: submit detected (field cleared after edit), finalizing session")
+            await completeSession(token: token, persist: true, fallbackFinalText: lastText)
+            return true
+        }
+
+        guard let baseline = await accessibilityRuntime.currentBaselineText(token: token) else {
+            return false
+        }
+
+        let isModified = !baseline.utf16.elementsEqual(liveText.utf16)
+
+        if isModified && !trimmedLive.isEmpty {
+            if lastObservedNonEmptyText == nil || !lastObservedNonEmptyText!.utf16.elementsEqual(liveText.utf16) {
+                lastObservedNonEmptyText = liveText
+                lastObservedEditTimestamp = now
+            } else if let lastEdit = lastObservedEditTimestamp,
+                now - lastEdit >= AutoLearnLimits.quiescenceDelayNanoseconds {
+                // Quiescence detection:
+                // User finished editing and stopped typing for 2.5s. Finalize and learn immediately!
+                logger.notice("Auto Learn: quiescence reached (no edits for 2.5s), finalizing session")
+                await completeSession(token: token, persist: true, fallbackFinalText: liveText)
+                return true
+            }
+        }
+
+        return false
+    }
+
     private func discardActiveSession() async {
         snapshotCancellationGeneration &+= 1
         let token = activeToken
@@ -320,10 +413,14 @@ actor AutoLearnService {
         deadlineTask = nil
         focusFinalizationTask?.cancel()
         focusFinalizationTask = nil
+        activeSamplingTask?.cancel()
+        activeSamplingTask = nil
         focusObserver.stop()
         activeToken = nil
         activeGeneration = nil
         activeProcessID = nil
+        lastObservedNonEmptyText = nil
+        lastObservedEditTimestamp = nil
         if let token {
             await accessibilityRuntime.discard(token: token)
         } else {
@@ -331,27 +428,40 @@ actor AutoLearnService {
         }
     }
 
-    private func completeSession(token: AutoLearnPasteToken, persist: Bool) async {
+    private func completeSession(
+        token: AutoLearnPasteToken,
+        persist: Bool,
+        fallbackFinalText: String? = nil
+    ) async {
         guard activeToken == token, activeGeneration != nil else { return }
         deadlineTask?.cancel()
-        activeToken = nil
-        activeGeneration = nil
-        activeProcessID = nil
         deadlineTask = nil
         focusFinalizationTask?.cancel()
         focusFinalizationTask = nil
+        activeSamplingTask?.cancel()
+        activeSamplingTask = nil
         focusObserver.stop()
+        activeToken = nil
+        activeGeneration = nil
+        activeProcessID = nil
+
+        let fallback = fallbackFinalText ?? lastObservedNonEmptyText
+        lastObservedNonEmptyText = nil
+        lastObservedEditTimestamp = nil
 
         if persist {
-            await persistFinishedSession(token: token)
+            await persistFinishedSession(token: token, fallbackFinalText: fallback)
         } else {
             await accessibilityRuntime.discard(token: token)
         }
     }
 
-    private func persistFinishedSession(token: AutoLearnPasteToken) async {
+    private func persistFinishedSession(
+        token: AutoLearnPasteToken,
+        fallbackFinalText: String? = nil
+    ) async {
         let cancellationGeneration = snapshotCancellationGeneration
-        let snapshot = await accessibilityRuntime.finishSnapshot(token: token)
+        let snapshot = await accessibilityRuntime.finishSnapshot(token: token, fallbackFinalText: fallbackFinalText)
         guard snapshotCancellationGeneration == cancellationGeneration else { return }
         await persistSnapshot(snapshot)
     }

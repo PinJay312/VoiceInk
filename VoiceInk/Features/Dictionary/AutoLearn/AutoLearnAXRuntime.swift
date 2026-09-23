@@ -78,14 +78,43 @@ final class AutoLearnAXRuntime: @unchecked Sendable {
         }
     }
 
-    func finishSnapshot(token: AutoLearnPasteToken) async -> AutoLearnFieldSnapshot? {
+    func currentFieldText(token: AutoLearnPasteToken) async -> String? {
+        await perform { [self] in
+            guard let active = session, active.token == token else { return nil }
+            return textReader.textValue(from: active.targetElement)?.text
+        }
+    }
+
+    func currentBaselineText(token: AutoLearnPasteToken) async -> String? {
+        await perform { [self] in
+            guard let active = session, active.token == token else { return nil }
+            return active.baselineFieldText
+        }
+    }
+
+    func finishSnapshot(token: AutoLearnPasteToken, fallbackFinalText: String? = nil) async -> AutoLearnFieldSnapshot? {
         await perform { [self] in
             guard let active = session, active.token == token else { return nil }
             session = nil
 
             defer { textReader.restoreWebAccessibility(processID: AXProcessID(active.appElement), appElement: active.appElement) }
-            guard let finalTextValue = textReader.textValue(from: active.targetElement) else { return nil }
-            let finalFieldText = finalTextValue.text
+            let liveText = textReader.textValue(from: active.targetElement)?.text
+
+            let finalFieldText: String
+            if let fallback = fallbackFinalText, !fallback.isEmpty {
+                if liveText == nil
+                    || liveText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true
+                    || textIsExactlyEqual(liveText ?? "", active.baselineFieldText) {
+                    finalFieldText = fallback
+                } else {
+                    finalFieldText = liveText ?? fallback
+                }
+            } else if let live = liveText {
+                finalFieldText = live
+            } else {
+                return nil
+            }
+
             guard finalFieldText.utf16.count <= AutoLearnLimits.maximumFieldUTF16Length else { return nil }
             guard !textIsExactlyEqual(finalFieldText, active.baselineFieldText) else { return nil }
 
@@ -206,74 +235,102 @@ final class AutoLearnAXRuntime: @unchecked Sendable {
         let field = fieldText as NSString
         let normalizedPastedText = AutoLearnTextNormalizer.accessibilityComparable(pastedText)
 
-        if let selectionAfterPaste {
+        // 1. If selection matches pasted text length or was inferred from caret position
+        if let selectionAfterPaste, isValid(selectionAfterPaste, inUTF16Length: field.length) {
+            if selectionAfterPaste.length == pastedText.utf16.count {
+                let observed = field.substring(with: selectionAfterPaste)
+                if textIsExactlyEqual(observed, pastedText)
+                    || (!normalizedPastedText.isEmpty && AutoLearnTextNormalizer.accessibilityComparable(observed) == normalizedPastedText) {
+                    return selectionAfterPaste
+                }
+            }
+
             if let inferredRange = pastedRange(
                 for: pastedText,
                 selectionAfterPaste: selectionAfterPaste,
                 fieldUTF16Length: field.length
             ) {
                 let observedText = field.substring(with: inferredRange)
-                if textIsExactlyEqual(observedText, pastedText) {
-                    return inferredRange
-                }
-                if !normalizedPastedText.isEmpty,
-                    AutoLearnTextNormalizer.accessibilityComparable(observedText)
-                        == normalizedPastedText
-                {
+                if textIsExactlyEqual(observedText, pastedText)
+                    || (!normalizedPastedText.isEmpty && AutoLearnTextNormalizer.accessibilityComparable(observedText) == normalizedPastedText) {
                     return inferredRange
                 }
             }
         }
 
-        let exactMatches = exactMatches(for: pastedText, in: fieldText)
-        if exactMatches.count == 1 {
-            return exactMatches[0]
+        // 2. Exact matches across the field
+        let fieldMatches = exactMatches(for: pastedText, in: fieldText)
+        if fieldMatches.count == 1 {
+            return fieldMatches[0]
         }
-
-        guard let selectionAfterPaste else {
-            if let boundaryMatch = uniqueBoundaryWhitespaceMatch(
-                for: pastedText,
-                in: fieldText
+        if fieldMatches.count > 1 {
+            if let selectionAfterPaste, selectionAfterPaste.location > 0,
+               let nearest = nearestMatch(
+                in: fieldMatches,
+                near: selectionAfterPaste.location,
+                pastedLength: pastedText.utf16.count
             ) {
-                return boundaryMatch
+                return nearest
             }
-            return nil
+            // If selection was {0, 0} or nearest match failed, pick the last occurrence (most recently pasted)
+            if let last = fieldMatches.last {
+                return last
+            }
         }
 
-        if let exactMatch = nearestMatch(
-            in: exactMatches,
-            near: selectionAfterPaste.location,
-            pastedLength: pastedText.utf16.count
+        // 3. Boundary whitespace match (even if selectionAfterPaste is present)
+        if let boundaryMatch = uniqueBoundaryWhitespaceMatch(
+            for: pastedText,
+            in: fieldText
         ) {
-            return exactMatch
+            return boundaryMatch
         }
 
-        guard selectionAfterPaste.length == 0 else { return nil }
+        // 4. Trimmed text match
+        let trimmedPasted = pastedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedPasted.isEmpty && trimmedPasted != pastedText {
+            let trimmedMatches = exactMatches(for: trimmedPasted, in: fieldText)
+            if trimmedMatches.count == 1 {
+                return trimmedMatches[0]
+            }
+            if let selectionAfterPaste, selectionAfterPaste.location > 0,
+               let nearest = nearestMatch(
+                in: trimmedMatches,
+                near: selectionAfterPaste.location,
+                pastedLength: trimmedPasted.utf16.count
+            ) {
+                return nearest
+            }
+            if let last = trimmedMatches.last {
+                return last
+            }
+        }
 
-        let expectedLength = pastedText.utf16.count
-        let maximumLengthAdjustment = min(max(expectedLength / 4, 8), 128)
-        guard !normalizedPastedText.isEmpty else { return nil }
-        let caretLocation = min(max(selectionAfterPaste.location, 0), field.length)
+        // 5. Caret neighborhood search (when selection is near end of text)
+        if let selectionAfterPaste, selectionAfterPaste.length == 0, selectionAfterPaste.location > 0 {
+            let expectedLength = pastedText.utf16.count
+            let maximumLengthAdjustment = min(max(expectedLength / 4, 8), 128)
+            guard !normalizedPastedText.isEmpty else { return nil }
+            let caretLocation = min(max(selectionAfterPaste.location, 0), field.length)
 
-        // Browser editors can expose the caret immediately before their own
-        // trailing whitespace. Search only the closest boundaries around it.
-        for endOffset in symmetricOffsets(upTo: 8) {
-            let candidateEnd = caretLocation + endOffset
-            guard candidateEnd >= 0, candidateEnd <= field.length else { continue }
+            for endOffset in symmetricOffsets(upTo: 8) {
+                let candidateEnd = caretLocation + endOffset
+                guard candidateEnd >= 0, candidateEnd <= field.length else { continue }
 
-            for lengthOffset in symmetricOffsets(upTo: maximumLengthAdjustment) {
-                let candidateLength = expectedLength + lengthOffset
-                guard candidateLength >= 0, candidateLength <= candidateEnd else { continue }
+                for lengthOffset in symmetricOffsets(upTo: maximumLengthAdjustment) {
+                    let candidateLength = expectedLength + lengthOffset
+                    guard candidateLength >= 0, candidateLength <= candidateEnd else { continue }
 
-                let candidateRange = NSRange(
-                    location: candidateEnd - candidateLength,
-                    length: candidateLength
-                )
-                let candidateText = field.substring(with: candidateRange)
-                if AutoLearnTextNormalizer.accessibilityComparable(candidateText)
-                    == normalizedPastedText
-                {
-                    return candidateRange
+                    let candidateRange = NSRange(
+                        location: candidateEnd - candidateLength,
+                        length: candidateLength
+                    )
+                    let candidateText = field.substring(with: candidateRange)
+                    if AutoLearnTextNormalizer.accessibilityComparable(candidateText)
+                        == normalizedPastedText
+                    {
+                        return candidateRange
+                    }
                 }
             }
         }

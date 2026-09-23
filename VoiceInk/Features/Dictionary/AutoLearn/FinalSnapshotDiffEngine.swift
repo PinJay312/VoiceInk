@@ -11,7 +11,11 @@ enum FinalSnapshotDiffEngine {
         }
 
         let baselinePastedText = baseline.substring(with: snapshot.pastedRange)
-        guard textIsExactlyEqual(baselinePastedText, snapshot.originalPastedText) else {
+        let normalizedBaselinePasted = AutoLearnTextNormalizer.accessibilityComparable(baselinePastedText)
+        let normalizedOriginalPasted = AutoLearnTextNormalizer.accessibilityComparable(snapshot.originalPastedText)
+        guard textIsExactlyEqual(baselinePastedText, snapshot.originalPastedText)
+            || (!normalizedBaselinePasted.isEmpty && textIsExactlyEqual(normalizedBaselinePasted, normalizedOriginalPasted))
+        else {
             return nil
         }
 
@@ -55,8 +59,13 @@ enum FinalSnapshotDiffEngine {
             leftBoundary = finalText.startIndex
         } else {
             let anchor = String(beforeText.suffix(16))
-            guard let range = uniqueRange(of: anchor, in: finalText) else { return nil }
-            leftBoundary = range.upperBound
+            if let range = uniqueRange(of: anchor, in: finalText) {
+                leftBoundary = range.upperBound
+            } else if let range = finalText.range(of: anchor, options: .backwards) {
+                leftBoundary = range.upperBound
+            } else {
+                leftBoundary = finalText.startIndex
+            }
         }
 
         let rightBoundary: String.Index
@@ -64,12 +73,16 @@ enum FinalSnapshotDiffEngine {
             rightBoundary = finalText.endIndex
         } else {
             let anchor = String(afterText.prefix(16))
-            guard let range = uniqueRange(of: anchor, in: finalText),
-                range.lowerBound >= leftBoundary
-            else { return nil }
-            rightBoundary = range.lowerBound
+            if let range = uniqueRange(of: anchor, in: finalText), range.lowerBound >= leftBoundary {
+                rightBoundary = range.lowerBound
+            } else if let range = finalText.range(of: anchor), range.lowerBound >= leftBoundary {
+                rightBoundary = range.lowerBound
+            } else {
+                rightBoundary = finalText.endIndex
+            }
         }
 
+        guard leftBoundary <= rightBoundary else { return nil }
         return String(finalText[leftBoundary..<rightBoundary])
     }
 
