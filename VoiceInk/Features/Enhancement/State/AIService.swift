@@ -27,7 +27,7 @@ enum AIProvider: String, CaseIterable {
         case .groq:
             return "https://api.groq.com/openai/v1/chat/completions"
         case .gemini:
-            return "https://generativelanguage.googleapis.com/v1/interactions"
+            return "https://generativelanguage.googleapis.com/v1beta/interactions"
         case .anthropic:
             return "https://api.anthropic.com/v1/messages"
         case .openAI:
