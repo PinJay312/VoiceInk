@@ -67,6 +67,10 @@ class CursorPaster {
         let autoLearnGeneration: UInt64?
         if AutoLearnSettings.isEnabled {
             let targetProcessID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            if let pid = targetProcessID {
+                let appElem = AXUIElementCreateApplication(pid)
+                _ = AXUIElementSetAttributeValue(appElem, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+            }
             pasteResult = await postPasteCommand()
             autoLearnGeneration = await AutoLearnService.shared.pasteDidFinish(
                 text: text,

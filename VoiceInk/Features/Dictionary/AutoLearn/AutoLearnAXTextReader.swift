@@ -82,9 +82,8 @@ final class AutoLearnAXTextReader {
     }
 
     func restoreWebAccessibility(processID: pid_t, appElement: AXUIElement) {
-        guard let previous = manualAccessibilityPreviousValue.removeValue(forKey: processID) else { return }
-        _ = AXUIElementSetAttributeValue(appElement, Self.manualAccessibilityAttribute, previous ? kCFBooleanTrue : kCFBooleanFalse)
-        manualAccessibilityLastEnabledAt.removeValue(forKey: processID)
+        // No-op: Keep AXManualAccessibility enabled so Chromium/Electron does not tear down
+        // its accessibility tree, which would cause kAXErrorCannotComplete (-25212) on next paste.
     }
 
     private func isEditable(_ element: AXUIElement) -> Bool {
@@ -270,10 +269,8 @@ final class AutoLearnAXTextReader {
             return
         }
 
-        guard let previousValue = copyBool(Self.manualAccessibilityAttribute, from: appElement) else {
-            return
-        }
         if manualAccessibilityPreviousValue[processID] == nil {
+            let previousValue = copyBool(Self.manualAccessibilityAttribute, from: appElement) ?? false
             manualAccessibilityPreviousValue[processID] = previousValue
         }
         let result = AXUIElementSetAttributeValue(

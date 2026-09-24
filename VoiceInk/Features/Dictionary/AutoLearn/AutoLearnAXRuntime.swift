@@ -52,7 +52,6 @@ final class AutoLearnAXRuntime: @unchecked Sendable {
             }
 
             guard let reading = matchedReading, let pastedRange else {
-                textReader.restoreWebAccessibility(processID: processID, appElement: AXUIElementCreateApplication(processID))
                 return rejectCapture(
                     lastReading == nil ? "focused-text-reading-unavailable" : "pasted-range-invalid"
                 )

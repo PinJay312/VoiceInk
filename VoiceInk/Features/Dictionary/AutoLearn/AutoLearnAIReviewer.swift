@@ -127,6 +127,9 @@ final class AutoLearnAIReviewer: @unchecked Sendable {
             provider: provider,
             modelName: modelName
         )
+        logger.notice(
+            "Auto Learn AI payload: request=\(requestText, privacy: .public) response=\(responseText, privacy: .public)"
+        )
         let candidateReviewDecisions = try decodeResponse(
             responseText,
             provider: provider,
@@ -429,47 +432,45 @@ final class AutoLearnAIReviewer: @unchecked Sendable {
     }
 
     private static let reviewPrompt = """
-        Review speech-to-text corrections. Each candidate has originalText and correctedText containing the edit plus up to three surrounding words on each side.
+        Review speech-to-text (ASR) corrections across English, Traditional/Simplified Chinese, and multilingual speech. Each candidate has originalText and correctedText containing the user's edit plus surrounding context.
 
-        Mandatory personal-name rule: A personal name is one indivisible term. For a visible multiword personal name, incorrectTextToReplace and correctedVocabularyTerm must contain every visible name component, including every unchanged component. Apply this rule even when only a middle name, surname, particle, spacing, punctuation, or suffix changed. Returning only the changed fragment or one component of a visible multiword name is invalid. When only one personal-name component is visible, such as only a first name or only a surname, it may qualify for addReplacementOnly but must not be added to Vocabulary. Allow a single-word personal name into Vocabulary only when context clearly establishes that the person is genuinely known by that complete mononym, not merely because only one name component appears in the snippet. Never invent name components that are not visible.
+        Core Purpose:
+        Identify speech-to-text recognition errors that the user corrected, and learn them as text replacements or vocabulary terms so future dictation outputs the intended wording automatically.
 
-        Identify every independently reusable correction. Usually return one decision per candidate. Separate adjacent independent terms. If learnable and ordinary edits are mixed, return only the learnable corrections. Return rejectCorrection only when nothing is learnable, and never mix rejection with acceptance for one candidateID.
+        Phonetic & Speech Misrecognition Principles:
+        1. Phonetic resemblance / Homophones:
+           - In Chinese (Traditional and Simplified), speech recognition frequently produces homophones (同音字) or near-homophones (近音字/拼音注音發音訛誤/聲調差異/捲舌與平舌音混淆). Examples include: 點書 → 點數, 本期 → 本機, 一者 → 一則, 勾語 → 口語, 基本數 → 幾本書, 備份 → 輩分, 機率 → 幾率.
+           - In English / multilingual speech, misrecognitions sound similar to the intended term (e.g. Gipart → GitHub, Viest → Vitest, pages → Pax, duck → Docker).
+           - When the original term and corrected term sound identical, nearly identical, or plausibly share pronunciation/transliteration in Mandarin, English, or other languages, THIS IS A GENUINE SPEECH-TO-TEXT ERROR. You MUST accept it, typically as addReplacementOnly.
+           - DO NOT reject Chinese homophone corrections or English phonetic corrections simply because the destination is a common word, daily vocabulary, or standard term (e.g., 點數, 本機, 口語, 一則). Replacing speech homophone errors with the user's intended word is the core utility of addReplacementOnly.
 
-        Before selecting an action, every acceptance must pass both gates:
+        2. Technical, Software, Brand, and Proper Names:
+           - Technologies, libraries, tools, brands, and domain-specific terms (e.g., GitHub, React, Docker, Python, Xcode, Whisper, Claude, Gemini, macOS, Notion) and user project names are valid and encouraged to learn. If speech recognition misrecognized or mangled them, accept as addReplacementAndVocabulary or addReplacementOnly.
 
-        1. Phonetic evidence: the changed source and destination spans must recognizably resemble two renderings of the same spoken term. Judge a multiword personal name collectively. Differences caused by accent, transliteration, word boundaries, hyphenation, or omitted diacritics may still be phonetic when the pronunciations plausibly correspond. Related meaning, context, specificity, private status, and Vocabulary usefulness are not themselves phonetic evidence. Reject absent or uncertain resemblance.
+        3. Mandatory personal-name rule:
+           - A personal name is one indivisible term. For a visible multiword personal name, incorrectTextToReplace and correctedVocabularyTerm must contain every visible name component. If only one component (e.g., first name or surname) changed or is visible, use addReplacementOnly rather than Vocabulary.
 
-        2. No semantic rewrite: reject edits that change meaning or replace coherent language—a description, role, category, purpose, location, relationship, criterion, synonym, or placeholder—with a specific person, place, product, service, or term. Discard them completely even when the destination qualifies for Vocabulary.
+        Rejection Criteria (rejectCorrection):
+        - Semantic rewrites with completely unrelated pronunciation (e.g., "今天吃蘋果" → "今天吃香蕉", "星期一" → "星期五", "台北" → "高雄" - words that do not sound alike at all and merely change factual meaning or preference).
+        - Whole sentence rephrasings, substantial additions or deletions of independent thoughts, grammar rewrites.
+        - Formatting-only, whitespace-only, or punctuation-only edits.
+        - Case-only changes (e.g., "apple" → "Apple").
 
-        Only edits passing both gates may be accepted. Audit every acceptance against both gates before returning it; convert failures or uncertainty to rejectCorrection with both text fields null.
+        Learning Actions:
+        1. addReplacementAndVocabulary: The corrected term is a distinctive proper noun, personal name, brand, product, tech term, or domain term, and the original plausibly sounds like it.
+        2. addReplacementOnly: Use for speech-to-text phonetic/homophone misrecognitions (especially Chinese homophones/near-homophones like 點書→點數, 本期→本機, 一者→一則, 勾語→口語, or partial personal names). The original sounds like the corrected term, and the substitution is safe to apply whenever that misrecognition occurs.
+        3. addVocabularyOnly: The corrected term is a specialized term/name that should be recognized by the speech model, but the source error is too broad/ambiguous for a global replacement rule.
+        4. rejectCorrection: The edit shares no phonetic or homophonic resemblance (pure semantic rewrite), or is grammar/style rephrasing, or case-only change.
 
-        Choose one learningAction:
-
-        1. addReplacementAndVocabulary: the corrected term passes the Vocabulary gate and the original plausibly sounds like it.
-        2. addReplacementOnly: use for a distinctive, unambiguous, user-specific correction that is worth applying again but whose corrected term should not enter Vocabulary. This includes a learnable correction to a single visible first name or surname when the person's complete name is not visible. Never use this as a fallback for public, common, or generic terms.
-        3. addVocabularyOnly: the corrected term passes the Vocabulary gate and the pair passes the phonetic gate, but the source is too broad or ambiguous for a safe global replacement. Never use this for a partial personal name, coherent descriptions, semantic rewrites, deliberate abbreviations, or expansions.
-        4. rejectCorrection: nothing is safely reusable, including ordinary wording, grammar, style, meaning, facts, numbers, dates, abbreviations, expansions, changed qualifiers, editions, generic type words, and corrections a capable general-purpose ASR model should handle without permanent user-specific learning.
-
-        Vocabulary is primarily for complete personal names. A person's first name, surname, or other single component must not enter Vocabulary by itself unless it is clearly the person's complete mononym. This personal-name restriction does not apply to qualifying non-person entities: a single-token internal brand, project, private product, username, specialized term, small organization, or uncommon local place may enter Vocabulary when it is genuinely user-specific, private, or obscure enough to improve recognition.
-
-        Use context to identify user-specific entities. “Call”, “email”, “ask”, “invite”, or “send to” supports interpreting the adjacent text as a personal name. For a phonetically plausible personal name, spelling, apostrophe, spacing, hyphenation, and diacritic corrections are learnable—not formatting-only edits. A personal name remains learnable when it belongs to a well-known or public person. Labels such as “project”, “internal”, “repository”, “account”, “tenant”, or “pipeline” similarly support a user-specific entity. Context never substitutes for phonetic evidence or permits a semantic rewrite.
-
-        Do not learn ordinary words, brands, products, technologies, places, or organizations. Examples include Microsoft, Apple, Google, Xcode, Markdown, React, PostgreSQL, and GitHub. VoiceInk is user-specific and may be learned. Outside the user-specific contexts above, capitalization or proper-noun appearance alone is insufficient; when uncertain, reject.
-
-        Reject case-only changes and partial unsafe mappings.
-
-        Batch canonicalization: when corrected terms are clearly spelling or pronunciation variants of one entity, use one corrected form already present in correctedText for all related acceptances. Prefer the most frequent, then most complete plausible form. Never invent a form or merge by meaning alone.
-
-        For replacement actions, incorrectTextToReplace must be an exact nonempty contiguous substring of that candidate's originalText and correctedVocabularyTerm must be copied from correctedText, except canonicalization may copy it from another candidate. For addVocabularyOnly set incorrectTextToReplace to null. For rejectCorrection set both fields to null.
-
-        Before returning a personal-name decision, treat a visible multiword name as one indivisible term and verify that both fields contain the complete original and corrected names, even if only one component changed. Example: "Prakash Joshi Pages" to "Prakash Joshi Pax" must use the complete names, never only "Pages" to "Pax". If only one first name or surname is visible and the correction is otherwise safe and learnable, return addReplacementOnly for that visible component. Do not add it to Vocabulary and do not reject it merely because the person's full name is unavailable. Use a Vocabulary action for a single-word personal name only when the context clearly identifies a genuine mononym.
-
-        Return only one JSON array. Do not return an outer object, reviewDecisions key, explanation, Markdown, or code fence. Each array object must contain exactly these four fields: candidateID, learningAction, incorrectTextToReplace, and correctedVocabularyTerm.
+        Output Requirements:
+        - Return only one JSON array. Do not return an outer object, explanation, Markdown, or code fence.
+        - Each array object must contain exactly: candidateID, learningAction, incorrectTextToReplace, correctedVocabularyTerm.
+        - incorrectTextToReplace must be an exact nonempty contiguous substring of originalText.
+        - correctedVocabularyTerm must be copied exactly from correctedText.
+        - For addVocabularyOnly set incorrectTextToReplace to null.
+        - For rejectCorrection set both fields to null.
 
         Exact output format:
-        [{"candidateID":0,"learningAction":"addReplacementAndVocabulary","incorrectTextToReplace":"original term","correctedVocabularyTerm":"corrected term"},{"candidateID":1,"learningAction":"rejectCorrection","incorrectTextToReplace":null,"correctedVocabularyTerm":null}]
-
-        Allowed actions are addReplacementAndVocabulary, addReplacementOnly, addVocabularyOnly, and rejectCorrection. Copy every integer candidateID exactly and return each input candidateID at least once. Repeat an ID only for independent accepted corrections.
-
+        [{"candidateID":0,"learningAction":"addReplacementOnly","incorrectTextToReplace":"original term","correctedVocabularyTerm":"corrected term"},{"candidateID":1,"learningAction":"rejectCorrection","incorrectTextToReplace":null,"correctedVocabularyTerm":null}]
         """
 }

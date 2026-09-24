@@ -199,6 +199,26 @@ actor AutoLearnService {
         }
     }
 
+    func recordRevision(_ revision: AutoLearnRevision) async {
+        guard AutoLearnSettings.isEnabled else { return }
+        let candidates = CorrectionDiffEngine.candidates(from: revision)
+        logger.notice("Auto Learn recordRevision: found \(candidates.count, privacy: .public) candidate(s) from revision original=\(revision.original, privacy: .public) corrected=\(revision.corrected, privacy: .public)")
+        guard !candidates.isEmpty else { return }
+
+        do {
+            let insertedCount = try await pendingQueue.enqueue(candidates)
+            if insertedCount > 0 {
+                logger.notice(
+                    "Queued \(insertedCount, privacy: .public) Auto Learn candidate(s) for AI review"
+                )
+                await schedulePendingReview()
+            }
+            await notifyQueueChanged()
+        } catch {
+            log(error, message: "Failed to queue Auto Learn candidates")
+        }
+    }
+
     func pendingReviewCount() async throws -> Int {
         try await pendingQueue.pendingCount()
     }
@@ -291,8 +311,8 @@ actor AutoLearnService {
         else { return }
 
         var token: AutoLearnPasteToken?
-        let retryIntervalNanoseconds: UInt64 = 100_000_000
-        let maxAttempts = 3
+        let retryIntervalNanoseconds: UInt64 = 120_000_000
+        let maxAttempts = 5
 
         for attempt in 1...maxAttempts {
             if let captured = await accessibilityRuntime.capturePastedText(
@@ -311,33 +331,38 @@ actor AutoLearnService {
             else { break }
         }
 
-        guard let token else { return }
-
         guard lifecycleGeneration == generation,
             !Task.isCancelled,
             AutoLearnSettings.isEnabled
         else {
-            await accessibilityRuntime.discard(token: token)
+            if let token {
+                await accessibilityRuntime.discard(token: token)
+            }
             return
         }
 
-        activeToken = token
-        activeGeneration = generation
-        activeProcessID = processID
-        lastObservedNonEmptyText = nil
-        lastObservedEditTimestamp = nil
+        if let token {
+            activeToken = token
+            activeGeneration = generation
+            activeProcessID = processID
+            lastObservedNonEmptyText = nil
+            lastObservedEditTimestamp = nil
 
-        startActiveSampling(token: token, generation: generation)
+            startActiveSampling(token: token, generation: generation)
 
-        focusObserver.start(processID: processID, token: token) { token in
-            Task {
-                await AutoLearnService.shared.focusMayHaveChanged(token: token)
+            focusObserver.start(processID: processID, token: token) { token in
+                Task {
+                    await AutoLearnService.shared.focusMayHaveChanged(token: token)
+                }
             }
+            scheduleDeadline(
+                token: token,
+                after: AutoLearnLimits.observationDurationNanoseconds
+            )
+        } else {
+            logger.notice("Accessibility capture unavailable for processID=\(processID). Starting keyboard delta tracker fallback.")
+            AutoLearnKeyboardWatcher.shared.startObservation(pastedText: text, processID: processID)
         }
-        scheduleDeadline(
-            token: token,
-            after: AutoLearnLimits.observationDurationNanoseconds
-        )
     }
 
     private func startActiveSampling(token: AutoLearnPasteToken, generation: UInt64) {
@@ -408,6 +433,7 @@ actor AutoLearnService {
 
     private func discardActiveSession() async {
         snapshotCancellationGeneration &+= 1
+        AutoLearnKeyboardWatcher.shared.cancelObservation()
         let token = activeToken
         deadlineTask?.cancel()
         deadlineTask = nil
@@ -498,10 +524,17 @@ actor AutoLearnService {
     private func persistSnapshot(_ snapshot: AutoLearnFieldSnapshot?) async {
         guard AutoLearnSettings.isEnabled,
             let snapshot
-        else { return }
+        else {
+            logger.notice("Auto Learn persistSnapshot: snapshot is nil or auto-learn is disabled")
+            return
+        }
 
-        guard let revision = FinalSnapshotDiffEngine.revision(from: snapshot) else { return }
+        guard let revision = FinalSnapshotDiffEngine.revision(from: snapshot) else {
+            logger.notice("Auto Learn persistSnapshot: FinalSnapshotDiffEngine.revision returned nil! baseline=\(snapshot.baselineFieldText, privacy: .public) final=\(snapshot.finalFieldText, privacy: .public)")
+            return
+        }
         let candidates = CorrectionDiffEngine.candidates(from: revision)
+        logger.notice("Auto Learn persistSnapshot: found \(candidates.count, privacy: .public) candidate(s) from revision original=\(revision.original, privacy: .public) corrected=\(revision.corrected, privacy: .public)")
         guard !candidates.isEmpty else { return }
 
         do {
