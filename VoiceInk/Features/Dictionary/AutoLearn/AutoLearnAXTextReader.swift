@@ -24,6 +24,7 @@ final class AutoLearnAXTextReader {
     }
 
     private static let manualAccessibilityAttribute = "AXManualAccessibility" as CFString
+    private static let enhancedUserInterfaceAttribute = "AXEnhancedUserInterface" as CFString
     private static let selectedMarkerRangeAttribute = "AXSelectedTextMarkerRange" as CFString
     private static let documentStartMarkerAttribute = "AXStartTextMarker" as CFString
     private static let documentEndMarkerAttribute = "AXEndTextMarker" as CFString
@@ -273,14 +274,25 @@ final class AutoLearnAXTextReader {
             let previousValue = copyBool(Self.manualAccessibilityAttribute, from: appElement) ?? false
             manualAccessibilityPreviousValue[processID] = previousValue
         }
-        let result = AXUIElementSetAttributeValue(
+        _ = AXUIElementSetAttributeValue(
             appElement,
             Self.manualAccessibilityAttribute,
             kCFBooleanTrue
         )
-        if result == .success {
-            manualAccessibilityLastEnabledAt[processID] = now
+        _ = AXUIElementSetAttributeValue(
+            appElement,
+            Self.enhancedUserInterfaceAttribute,
+            kCFBooleanTrue
+        )
+        if let focusedWindow = copyElement(kAXFocusedWindowAttribute as CFString, from: appElement) {
+            _ = AXUIElementSetAttributeValue(focusedWindow, Self.enhancedUserInterfaceAttribute, kCFBooleanTrue)
+            _ = AXUIElementSetAttributeValue(focusedWindow, Self.manualAccessibilityAttribute, kCFBooleanTrue)
         }
+        if let mainWindow = copyElement(kAXMainWindowAttribute as CFString, from: appElement) {
+            _ = AXUIElementSetAttributeValue(mainWindow, Self.enhancedUserInterfaceAttribute, kCFBooleanTrue)
+            _ = AXUIElementSetAttributeValue(mainWindow, Self.manualAccessibilityAttribute, kCFBooleanTrue)
+        }
+        manualAccessibilityLastEnabledAt[processID] = now
     }
 
     private func appendUnique(

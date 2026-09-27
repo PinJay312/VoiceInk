@@ -58,6 +58,7 @@ final class NotificationManager {
         panel.contentView = hostingController.view
         panel.isFloatingPanel = true
         panel.level = NSWindow.Level.mainMenu
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.backgroundColor = NSColor.clear
         panel.hasShadow = false
         panel.isMovableByWindowBackground = false
@@ -86,7 +87,11 @@ final class NotificationManager {
     }
 
     private func positionWindow(_ window: NSWindow) {
-        let activeScreen = NSApp.keyWindow?.screen ?? NSScreen.main ?? NSScreen.screens[0]
+        let mouseLocation = NSEvent.mouseLocation
+        let activeScreen = NSScreen.screens.first { NSMouseInRect(mouseLocation, $0.frame, false) }
+            ?? NSApp.keyWindow?.screen
+            ?? NSScreen.main
+            ?? NSScreen.screens[0]
         let screenRect = activeScreen.visibleFrame
         let notificationRect = window.frame
 

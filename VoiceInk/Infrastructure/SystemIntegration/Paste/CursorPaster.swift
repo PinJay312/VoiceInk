@@ -70,6 +70,7 @@ class CursorPaster {
             if let pid = targetProcessID {
                 let appElem = AXUIElementCreateApplication(pid)
                 _ = AXUIElementSetAttributeValue(appElem, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+                _ = AXUIElementSetAttributeValue(appElem, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
             }
             pasteResult = await postPasteCommand()
             autoLearnGeneration = await AutoLearnService.shared.pasteDidFinish(
