@@ -381,15 +381,29 @@ final class AutoLearnAIReviewer: @unchecked Sendable {
         provider: AIProvider,
         modelName: String
     ) throws -> [CandidateReviewDecision] {
-        let payload = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if payload.hasPrefix("```") {
-            logInvalidResponse(
-                payload,
-                provider: provider,
-                modelName: modelName,
-                reason: "markdown-code-fence"
-            )
-            throw ReviewError.invalidResponse
+        var payload = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Strip markdown code fences if present (e.g. ```json ... ``` or ``` ... ```)
+        if let fenceStart = payload.range(of: "```") {
+            let afterFence = payload[fenceStart.upperBound...]
+            let jsonContent: Substring
+            if let firstNewline = afterFence.firstIndex(of: "\n") {
+                jsonContent = afterFence[afterFence.index(after: firstNewline)...]
+            } else {
+                jsonContent = afterFence
+            }
+            if let fenceEnd = jsonContent.range(of: "```", options: .backwards) {
+                payload = String(jsonContent[..<fenceEnd.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                payload = String(jsonContent).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
+        // If payload has surrounding commentary, extract between the outer brackets [ ... ]
+        if let firstBracket = payload.firstIndex(of: "["),
+           let lastBracket = payload.lastIndex(of: "]"),
+           firstBracket <= lastBracket {
+            payload = String(payload[firstBracket...lastBracket])
         }
 
         let data = Data(payload.utf8)
@@ -397,6 +411,9 @@ final class AutoLearnAIReviewer: @unchecked Sendable {
         do {
             return try JSONDecoder().decode([CandidateReviewDecision].self, from: data)
         } catch {
+            if let singleDecision = try? JSONDecoder().decode(CandidateReviewDecision.self, from: data) {
+                return [singleDecision]
+            }
             let diagnostic = invalidResponseDiagnostic(for: data)
             logInvalidResponse(
                 payload,
@@ -469,8 +486,9 @@ final class AutoLearnAIReviewer: @unchecked Sendable {
         - correctedVocabularyTerm must be copied exactly from correctedText.
         - For addVocabularyOnly set incorrectTextToReplace to null.
         - For rejectCorrection set both fields to null.
+        - If one candidate contains several separate homophone, near-homophone, or typo corrections, output one decision object per correction. Do not stop after the first correction. Every object uses that same candidateID, and the pairs must be distinct non-overlapping substrings. Do not emit rejectCorrection for the unchanged remainder of that candidate. Emit a single rejectCorrection only when the candidate contains no speech-to-text correction at all.
 
         Exact output format:
-        [{"candidateID":0,"learningAction":"addReplacementOnly","incorrectTextToReplace":"original term","correctedVocabularyTerm":"corrected term"},{"candidateID":1,"learningAction":"rejectCorrection","incorrectTextToReplace":null,"correctedVocabularyTerm":null}]
+        [{"candidateID":0,"learningAction":"addReplacementOnly","incorrectTextToReplace":"常班","correctedVocabularyTerm":"長班"},{"candidateID":0,"learningAction":"addReplacementOnly","incorrectTextToReplace":"念課表","correctedVocabularyTerm":"練課表"},{"candidateID":1,"learningAction":"rejectCorrection","incorrectTextToReplace":null,"correctedVocabularyTerm":null}]
         """
 }

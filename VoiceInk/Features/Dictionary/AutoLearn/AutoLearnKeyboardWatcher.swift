@@ -29,6 +29,12 @@ final class AutoLearnKeyboardWatcher: @unchecked Sendable {
     private var quiescenceTimer: DispatchSourceTimer?
     private var deadlineTimer: DispatchSourceTimer?
 
+    /// Idle gap after the latest edit before the session is committed.
+    /// Long enough to move to the next word, including an IME confirmation.
+    private static let quiescenceDelay: TimeInterval = 5.0
+    /// Hard stop for one paste observation. Edits still present are committed.
+    private static let observationDeadline: TimeInterval = 30.0
+
     private init() {
         installTap()
     }
@@ -56,9 +62,8 @@ final class AutoLearnKeyboardWatcher: @unchecked Sendable {
             self.enableTap(true)
             self.logger.notice("KeyboardWatcher started observation for '\(pastedText, privacy: .public)' (processID: \(processID ?? -1))")
 
-            // Schedule total deadline (12 seconds)
             let deadline = DispatchSource.makeTimerSource(queue: self.queue)
-            deadline.schedule(deadline: .now() + 12.0)
+            deadline.schedule(deadline: .now() + Self.observationDeadline)
             deadline.setEventHandler { [weak self] in
                 self?.handleDeadline()
             }
@@ -81,7 +86,7 @@ final class AutoLearnKeyboardWatcher: @unchecked Sendable {
         quiescenceTimer = nil
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 2.0)
+        timer.schedule(deadline: .now() + Self.quiescenceDelay)
         timer.setEventHandler { [weak self] in
             self?.handleQuiescence()
         }
@@ -120,7 +125,12 @@ final class AutoLearnKeyboardWatcher: @unchecked Sendable {
         enableTap(false)
 
         let original = current.originalText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let corrected = current.currentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tracked = current.currentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let corrected = resolvedCorrectedText(
+            original: original,
+            tracked: tracked,
+            processID: current.processID
+        )
 
         guard !original.isEmpty, !corrected.isEmpty, original != corrected else {
             logger.notice("KeyboardWatcher commit: no effective diff between '\(original, privacy: .public)' and '\(corrected, privacy: .public)'")
@@ -223,15 +233,22 @@ final class AutoLearnKeyboardWatcher: @unchecked Sendable {
             case 123: // Left Arrow
                 current.cursorOffset = max(0, current.cursorOffset - 1)
                 self.session = current
+                if current.hasEdits {
+                    self.scheduleQuiescenceTimer()
+                }
 
             case 124: // Right Arrow
                 current.cursorOffset = min(current.currentText.count, current.cursorOffset + 1)
                 self.session = current
-
-            case 36, 76: // Return / Enter
                 if current.hasEdits {
-                    self.logger.notice("KeyboardWatcher Return key pressed with active edits")
-                    self.commitSession()
+                    self.scheduleQuiescenceTimer()
+                }
+
+            case 36, 76: // Return / Enter confirms an IME candidate or inserts a newline.
+                // Do not end the session: the user may still correct later words.
+                if current.hasEdits {
+                    self.logger.notice("KeyboardWatcher Return key pressed; resetting quiescence timer")
+                    self.scheduleQuiescenceTimer()
                 }
 
             default:
@@ -281,5 +298,55 @@ final class AutoLearnKeyboardWatcher: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    /// Prefer the focused field's full Accessibility text over the keystroke
+    /// buffer, then compare that text with the original paste. A document-sized
+    /// field is ignored so a whole page is not treated as one correction.
+    private func resolvedCorrectedText(
+        original: String,
+        tracked: String,
+        processID: pid_t?
+    ) -> String {
+        guard let processID else { return tracked }
+
+        let readings = AutoLearnAXTextReader().focusedReadings(processID: processID)
+        let fields: [(text: String, source: String)] = readings.compactMap { reading in
+            let text = reading.fieldText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            return (text, "\(reading.focusSource)/\(reading.source)")
+        }
+        logger.notice(
+            "KeyboardWatcher AX readings=\(readings.count, privacy: .public) nonempty=\(fields.count, privacy: .public)"
+        )
+
+        let referenceCount = max(original.count, tracked.count, 1)
+        let plausible = fields.filter { field in
+            field.text.count <= max(referenceCount * 3, referenceCount + 80)
+        }
+        guard
+            let best = plausible.min(by: {
+                abs($0.text.count - referenceCount) < abs($1.text.count - referenceCount)
+            })
+        else {
+            if !fields.isEmpty {
+                logger.notice(
+                    "KeyboardWatcher AX field is much larger than the paste; keeping tracked text characters=\(tracked.count, privacy: .public)"
+                )
+            } else {
+                logger.notice("KeyboardWatcher AX text unavailable; keeping tracked text")
+            }
+            return tracked
+        }
+
+        logger.notice(
+            "KeyboardWatcher AX selected source=\(best.source, privacy: .public) characters=\(best.text.count, privacy: .public)"
+        )
+        guard best.text != original else { return tracked }
+
+        logger.notice(
+            "KeyboardWatcher resolved actual text via accessibility: '\(best.text, privacy: .public)'"
+        )
+        return best.text
     }
 }

@@ -83,8 +83,9 @@ local: check setup
 		SWIFT_ACTIVE_COMPILATION_CONDITIONS='$$(inherited) LOCAL_BUILD' \
 		-skipPackagePluginValidation \
 		-skipMacroValidation \
-		build
+		build && printf '%s' "$$SIGNING_IDENTITY" > "$(LOCAL_DERIVED_DATA)/signing-identity"
 	@APP_PATH="$(LOCAL_DERIVED_DATA)/Build/Products/Release/VoiceInk.app" && \
+	SIGNING_IDENTITY=$$(cat "$(LOCAL_DERIVED_DATA)/signing-identity" 2>/dev/null || true) && \
 	if [ -d "$$APP_PATH" ]; then \
 		ditto "$$APP_PATH" "$$HOME/Downloads/VoiceInk.app"; \
 		if [ -n "$$SIGNING_IDENTITY" ] && [ "$$SIGNING_IDENTITY" != "-" ]; then \

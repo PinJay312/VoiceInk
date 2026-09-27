@@ -24,6 +24,8 @@ enum CorrectionDiffEngine {
     ]
     private static let structuralSeparators: Set<Character> = [
         ",", "!", "?", ";", ":", "…", "(", ")", "[", "]", "{", "}", "\"", "“", "”",
+        "。", "，", "、", "；", "：", "！", "？",
+        "「", "」", "『", "』", "（", "）", "《", "》",
     ]
 
     static func candidates(from revision: AutoLearnRevision) -> [DetectedCorrectionCandidate] {
@@ -125,43 +127,49 @@ enum CorrectionDiffEngine {
         var segmentStart: String.Index?
         var index = text.startIndex
 
+        func flushSegment(endingAt end: String.Index) {
+            guard let start = segmentStart, start < end else {
+                segmentStart = nil
+                return
+            }
+            let range = start..<end
+            results.append(
+                TextSegment(text: String(text[range]), range: range, isBoundary: false)
+            )
+            segmentStart = nil
+        }
+
         while index < text.endIndex {
             let character = text[index]
+            let next = text.index(after: index)
             if character.isWhitespace {
-                if let start = segmentStart {
-                    let range = start..<index
-                    results.append(
-                        TextSegment(text: String(text[range]), range: range, isBoundary: false)
-                    )
-                    segmentStart = nil
-                }
+                flushSegment(endingAt: index)
             } else if isStructuralSeparator(at: index, in: text) {
-                if let start = segmentStart {
-                    let range = start..<index
-                    results.append(
-                        TextSegment(text: String(text[range]), range: range, isBoundary: false)
-                    )
-                    segmentStart = nil
-                }
-
-                let end = text.index(after: index)
-                let range = index..<end
+                flushSegment(endingAt: index)
+                let range = index..<next
                 results.append(
                     TextSegment(text: String(text[range]), range: range, isBoundary: true)
+                )
+            } else if isCompactScriptCharacter(character) {
+                // Unspaced CJK (and other compact scripts) must not collapse into
+                // one segment, or every edit in the sentence becomes a single hunk.
+                flushSegment(endingAt: index)
+                let range = index..<next
+                results.append(
+                    TextSegment(text: String(text[range]), range: range, isBoundary: false)
                 )
             } else if segmentStart == nil {
                 segmentStart = index
             }
-            index = text.index(after: index)
+            index = next
         }
 
-        if let start = segmentStart {
-            let range = start..<text.endIndex
-            results.append(
-                TextSegment(text: String(text[range]), range: range, isBoundary: false)
-            )
-        }
+        flushSegment(endingAt: text.endIndex)
         return results
+    }
+
+    private static func isCompactScriptCharacter(_ character: Character) -> Bool {
+        character.unicodeScalars.contains(where: isCompactScriptScalar)
     }
 
     private static func isStructuralSeparator(

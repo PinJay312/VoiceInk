@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Foundation
+import os
 import ScreenCaptureKit
 import Vision
 
@@ -15,9 +16,13 @@ class ScreenCaptureService: ObservableObject {
         let frame: CGRect?
     }
 
-    private static let captureTimeout: TimeInterval = 3.0
+    private static let captureTimeout: TimeInterval = 5.0
     nonisolated private static let maximumCaptureDimension: CGFloat = 2800
     nonisolated private static let focusedWindowFrameTolerance: CGFloat = 96
+    nonisolated private static let logger = Logger(
+        subsystem: "com.prakashjoshipax.voiceink",
+        category: "ScreenCapture"
+    )
 
     static func requestScreenCapturePermissionRegistration() async -> Bool {
         if CGPreflightScreenCaptureAccess() {
@@ -38,15 +43,31 @@ class ScreenCaptureService: ObservableObject {
     }
 
     func captureAndExtractText() async -> String? {
-        guard !isCapturing else { return nil }
+        guard !isCapturing else {
+            Self.logger.notice("Screen capture skipped because another capture is already running")
+            return nil
+        }
 
         isCapturing = true
         defer {
             isCapturing = false
         }
 
+        let permissionGranted = CGPreflightScreenCaptureAccess()
+        let permissionLabel = permissionGranted ? "true" : "false"
+        let timeoutSeconds = Int(Self.captureTimeout)
+        Self.logger.notice(
+            "Screen capture started permissionGranted=\(permissionLabel, privacy: .public) timeoutSeconds=\(timeoutSeconds, privacy: .public)"
+        )
+        if !permissionGranted {
+            Self.logger.error(
+                "Screen recording permission is not granted. Enable this VoiceInk build in System Settings > Privacy & Security > Screen & System Audio Recording."
+            )
+        }
+
         let currentPID = ProcessInfo.processInfo.processIdentifier
         let focusedWindowHint = makeFocusedWindowHint(excluding: currentPID)
+        let started = Date()
 
         guard
             let contextText = await Self.withTimeout(
@@ -58,10 +79,26 @@ class ScreenCaptureService: ObservableObject {
                     )
                 })
         else {
+            let elapsedMs = Int(Date().timeIntervalSince(started) * 1000)
+            let timeoutSeconds = Int(Self.captureTimeout)
+            if Date().timeIntervalSince(started) + 0.05 >= Self.captureTimeout {
+                Self.logger.error(
+                    "Screen capture timed out elapsedMs=\(elapsedMs, privacy: .public) limitSeconds=\(timeoutSeconds, privacy: .public)"
+                )
+            } else {
+                Self.logger.error(
+                    "Screen capture returned no context elapsedMs=\(elapsedMs, privacy: .public)"
+                )
+            }
             return nil
         }
 
         lastCapturedText = contextText
+        let contextCharacters = contextText.count
+        let elapsedMs = Int(Date().timeIntervalSince(started) * 1000)
+        Self.logger.notice(
+            "Screen capture context ready characters=\(contextCharacters, privacy: .public) elapsedMs=\(elapsedMs, privacy: .public)"
+        )
         return contextText
     }
 
@@ -99,8 +136,15 @@ class ScreenCaptureService: ObservableObject {
         focusedWindowHint: FocusedWindowHint?,
         currentPID: pid_t
     ) async -> String? {
+        let started = Date()
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            let windowCount = content.windows.count
+            let listElapsedMs = elapsedMilliseconds(since: started)
+            let permissionLabel = CGPreflightScreenCaptureAccess() ? "true" : "false"
+            logger.notice(
+                "SCShareableContent ready windows=\(windowCount, privacy: .public) elapsedMs=\(listElapsedMs, privacy: .public) permissionGranted=\(permissionLabel, privacy: .public)"
+            )
 
             guard
                 let window = findActiveWindow(
@@ -109,21 +153,40 @@ class ScreenCaptureService: ObservableObject {
                     currentPID: currentPID
                 )
             else {
+                let focusedPID = focusedWindowHint?.processID ?? -1
+                logger.error(
+                    "No capturable window windows=\(windowCount, privacy: .public) focusedPID=\(focusedPID, privacy: .public)"
+                )
                 return nil
             }
 
             let title = window.title ?? window.owningApplication?.applicationName ?? "Unknown"
             let appName = window.owningApplication?.applicationName ?? "Unknown"
+            let frame = window.frame
 
             let filter = SCContentFilter(desktopIndependentWindow: window)
 
             let configuration = SCStreamConfiguration()
-            let captureScale = captureScale(for: window.frame.size)
-            configuration.width = max(1, Int(window.frame.width * captureScale))
-            configuration.height = max(1, Int(window.frame.height * captureScale))
+            let captureScale = captureScale(for: frame.size)
+            configuration.width = max(1, Int(frame.width * captureScale))
+            configuration.height = max(1, Int(frame.height * captureScale))
+            let frameWidth = Int(frame.width)
+            let frameHeight = Int(frame.height)
+            let pixelWidth = configuration.width
+            let pixelHeight = configuration.height
+            logger.notice(
+                "Capturing window app=\(appName, privacy: .public) title=\(title, privacy: .public) frame=\(frameWidth, privacy: .public)x\(frameHeight, privacy: .public) pixels=\(pixelWidth, privacy: .public)x\(pixelHeight, privacy: .public)"
+            )
 
+            let screenshotStarted = Date()
             let cgImage = try await SCScreenshotManager.captureImage(
                 contentFilter: filter, configuration: configuration)
+            let imageWidth = cgImage.width
+            let imageHeight = cgImage.height
+            let screenshotElapsedMs = elapsedMilliseconds(since: screenshotStarted)
+            logger.notice(
+                "Screenshot captured image=\(imageWidth, privacy: .public)x\(imageHeight, privacy: .public) elapsedMs=\(screenshotElapsedMs, privacy: .public)"
+            )
 
             var contextText = """
                 Active Window: \(title)
@@ -131,7 +194,13 @@ class ScreenCaptureService: ObservableObject {
 
                 """
 
+            let ocrStarted = Date()
             let extractedText = extractText(from: cgImage)
+            let ocrCharacters = extractedText?.count ?? 0
+            let ocrElapsedMs = elapsedMilliseconds(since: ocrStarted)
+            logger.notice(
+                "OCR finished characters=\(ocrCharacters, privacy: .public) elapsedMs=\(ocrElapsedMs, privacy: .public)"
+            )
             if let extractedText, !extractedText.isEmpty {
                 contextText += "Window Content:\n\(extractedText)"
             } else {
@@ -141,8 +210,38 @@ class ScreenCaptureService: ObservableObject {
             return contextText
 
         } catch {
+            logCaptureError(error, elapsedSince: started)
             return nil
         }
+    }
+
+    private nonisolated static func logCaptureError(_ error: Error, elapsedSince started: Date) {
+        let nsError = error as NSError
+        let domain = nsError.domain
+        let code = nsError.code
+        let description = nsError.localizedDescription
+        let elapsedMs = elapsedMilliseconds(since: started)
+        logger.error(
+            "Screen capture failed domain=\(domain, privacy: .public) code=\(code, privacy: .public) elapsedMs=\(elapsedMs, privacy: .public) description=\(description, privacy: .public)"
+        )
+        if nsError.domain == SCStreamErrorDomain && nsError.code == SCStreamError.userDeclined.rawValue {
+            logger.error(
+                "Screen recording permission denied (SCStreamErrorUserDeclined). Grant access in System Settings > Privacy & Security > Screen & System Audio Recording."
+            )
+        } else if nsError.domain == SCStreamErrorDomain
+            && nsError.code == SCStreamError.missingEntitlements.rawValue
+        {
+            logger.error("Screen capture missing entitlements (SCStreamErrorMissingEntitlements).")
+        }
+        if !CGPreflightScreenCaptureAccess() {
+            logger.error(
+                "CGPreflightScreenCaptureAccess returned false. This VoiceInk build does not have Screen Recording permission."
+            )
+        }
+    }
+
+    private nonisolated static func elapsedMilliseconds(since date: Date) -> Int {
+        Int(Date().timeIntervalSince(date) * 1000)
     }
 
     private nonisolated static func findActiveWindow(
@@ -218,14 +317,35 @@ class ScreenCaptureService: ObservableObject {
         do {
             try requestHandler.perform([request])
             guard let observations = request.results else {
+                let imageWidth = cgImage.width
+                let imageHeight = cgImage.height
+                logger.error(
+                    "Vision OCR returned no result list for image=\(imageWidth, privacy: .public)x\(imageHeight, privacy: .public)"
+                )
                 return nil
             }
             let text =
                 observations
                 .compactMap { $0.topCandidates(1).first?.string }
                 .joined(separator: "\n")
-            return text.isEmpty ? nil : text
+            if text.isEmpty {
+                let observationCount = observations.count
+                let imageWidth = cgImage.width
+                let imageHeight = cgImage.height
+                logger.notice(
+                    "Vision OCR found no text observations=\(observationCount, privacy: .public) image=\(imageWidth, privacy: .public)x\(imageHeight, privacy: .public)"
+                )
+                return nil
+            }
+            return text
         } catch {
+            let nsError = error as NSError
+            let domain = nsError.domain
+            let code = nsError.code
+            let description = nsError.localizedDescription
+            logger.error(
+                "Vision OCR failed domain=\(domain, privacy: .public) code=\(code, privacy: .public) description=\(description, privacy: .public)"
+            )
             return nil
         }
     }
