@@ -21,6 +21,7 @@ final class AutoLearnKeyboardWatcher: @unchecked Sendable {
         var currentText: String
         var cursorOffset: Int
         let processID: pid_t?
+        let cmuxSurfaceRef: String?
         let startTime: DispatchTime
         var hasEdits: Bool
     }
@@ -55,6 +56,7 @@ final class AutoLearnKeyboardWatcher: @unchecked Sendable {
                 currentText: pastedText,
                 cursorOffset: pastedText.count,
                 processID: processID,
+                cmuxSurfaceRef: AutoLearnCmuxTextReader.activeSurfaceRef(processID: processID),
                 startTime: .now(),
                 hasEdits: false
             )
@@ -129,7 +131,8 @@ final class AutoLearnKeyboardWatcher: @unchecked Sendable {
         let corrected = resolvedCorrectedText(
             original: original,
             tracked: tracked,
-            processID: current.processID
+            processID: current.processID,
+            cmuxSurfaceRef: current.cmuxSurfaceRef
         )
 
         guard !original.isEmpty, !corrected.isEmpty, original != corrected else {
@@ -306,7 +309,8 @@ final class AutoLearnKeyboardWatcher: @unchecked Sendable {
     private func resolvedCorrectedText(
         original: String,
         tracked: String,
-        processID: pid_t?
+        processID: pid_t?,
+        cmuxSurfaceRef: String?
     ) -> String {
         guard let processID else { return tracked }
 
@@ -324,29 +328,37 @@ final class AutoLearnKeyboardWatcher: @unchecked Sendable {
         let plausible = fields.filter { field in
             field.text.count <= max(referenceCount * 3, referenceCount + 80)
         }
-        guard
-            let best = plausible.min(by: {
-                abs($0.text.count - referenceCount) < abs($1.text.count - referenceCount)
-            })
-        else {
-            if !fields.isEmpty {
+        if let best = plausible.min(by: {
+            abs($0.text.count - referenceCount) < abs($1.text.count - referenceCount)
+        }) {
+            logger.notice(
+                "KeyboardWatcher AX selected source=\(best.source, privacy: .public) characters=\(best.text.count, privacy: .public)"
+            )
+            if best.text != original {
                 logger.notice(
-                    "KeyboardWatcher AX field is much larger than the paste; keeping tracked text characters=\(tracked.count, privacy: .public)"
+                    "KeyboardWatcher resolved actual text via accessibility: '\(best.text, privacy: .public)'"
                 )
-            } else {
-                logger.notice("KeyboardWatcher AX text unavailable; keeping tracked text")
+                return best.text
             }
-            return tracked
+        } else if !fields.isEmpty {
+            logger.notice(
+                "KeyboardWatcher AX field is much larger than the paste; trying app-specific readers"
+            )
+        } else {
+            logger.notice("KeyboardWatcher AX text unavailable; trying app-specific readers")
         }
 
-        logger.notice(
-            "KeyboardWatcher AX selected source=\(best.source, privacy: .public) characters=\(best.text.count, privacy: .public)"
-        )
-        guard best.text != original else { return tracked }
+        if let cmuxSurfaceRef,
+            let cmuxText = AutoLearnCmuxTextReader.composerText(surfaceRef: cmuxSurfaceRef),
+            AutoLearnCmuxTextReader.isPlausibleCorrection(original: original, candidate: cmuxText)
+        {
+            logger.notice(
+                "KeyboardWatcher resolved actual text via cmux surface=\(cmuxSurfaceRef, privacy: .public): '\(cmuxText, privacy: .public)'"
+            )
+            return cmuxText
+        }
 
-        logger.notice(
-            "KeyboardWatcher resolved actual text via accessibility: '\(best.text, privacy: .public)'"
-        )
-        return best.text
+        logger.notice("KeyboardWatcher app-specific text unavailable; keeping tracked text")
+        return tracked
     }
 }

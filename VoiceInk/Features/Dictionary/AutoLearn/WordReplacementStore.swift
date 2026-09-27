@@ -40,11 +40,11 @@ actor WordReplacementStore {
                         let correctedVocabularyTerm = decision.correctedVocabularyTerm
                     else { continue }
 
-                    let mutation: (created: Bool, updated: Bool)
-                    let shouldAddVocabulary: Bool
+                    let mutation: (created: Bool, updated: Bool, sourceVariantCount: Int)
+                    let explicitlyAddsVocabulary: Bool
                     switch decision.learningAction {
                     case .addReplacementAndVocabulary:
-                        shouldAddVocabulary = true
+                        explicitlyAddsVocabulary = true
                         guard let incorrectTextToReplace = decision.incorrectTextToReplace else {
                             continue
                         }
@@ -55,7 +55,7 @@ actor WordReplacementStore {
                             existingSourceKeys: &existingSourceKeys
                         )
                     case .addReplacementOnly:
-                        shouldAddVocabulary = false
+                        explicitlyAddsVocabulary = false
                         guard let incorrectTextToReplace = decision.incorrectTextToReplace else {
                             continue
                         }
@@ -66,14 +66,19 @@ actor WordReplacementStore {
                             existingSourceKeys: &existingSourceKeys
                         )
                     case .addVocabularyOnly:
-                        shouldAddVocabulary = true
-                        mutation = (false, false)
+                        explicitlyAddsVocabulary = true
+                        mutation = (false, false, 0)
                     case .rejectCorrection:
                         continue
                     }
                     createdCount += mutation.created ? 1 : 0
                     updatedCount += mutation.updated ? 1 : 0
 
+                    // Two independently observed source variants for the same destination
+                    // are strong evidence that exact replacement alone is too narrow.
+                    let shouldAddVocabulary = explicitlyAddsVocabulary
+                        || (decision.learningAction == .addReplacementOnly
+                            && mutation.sourceVariantCount >= 2)
                     let vocabulary = correctedVocabularyTerm
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                         .precomposedStringWithCanonicalMapping
@@ -114,6 +119,41 @@ actor WordReplacementStore {
             vocabularyCount: vocabularyCount,
             learnedCorrections: learnedCorrections
         )
+    }
+
+    func promoteRepeatedReplacementDestinationsToVocabulary() throws -> Int {
+        var createdCount = 0
+        do {
+            try modelContext.transaction {
+                let replacements = try modelContext.fetch(FetchDescriptor<WordReplacement>())
+                var vocabularyKeys = Set(
+                    try modelContext.fetch(FetchDescriptor<VocabularyWord>()).map {
+                        WordReplacementVariants.key(for: $0.word)
+                    }
+                )
+
+                for replacement in replacements where replacement.isEnabled {
+                    guard WordReplacementVariants.parse(replacement.originalText).count >= 2 else {
+                        continue
+                    }
+                    let vocabulary = replacement.replacementText
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .precomposedStringWithCanonicalMapping
+                    let vocabularyKey = WordReplacementVariants.key(for: vocabulary)
+                    guard !vocabularyKey.isEmpty,
+                        vocabularyKeys.insert(vocabularyKey).inserted
+                    else { continue }
+
+                    modelContext.insert(VocabularyWord(word: vocabulary))
+                    createdCount += 1
+                }
+            }
+            try modelContext.save()
+        } catch {
+            modelContext.rollback()
+            throw error
+        }
+        return createdCount
     }
 
     func undo(_ correction: AutoLearnAppliedCorrection) throws {
@@ -171,7 +211,7 @@ actor WordReplacementStore {
         destination rawDestination: String,
         entries: inout [WordReplacement],
         existingSourceKeys: inout Set<String>
-    ) throws -> (created: Bool, updated: Bool) {
+    ) throws -> (created: Bool, updated: Bool, sourceVariantCount: Int) {
         let source = rawSource.trimmingCharacters(in: .whitespacesAndNewlines)
             .precomposedStringWithCanonicalMapping
         let destination = rawDestination.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -192,7 +232,7 @@ actor WordReplacementStore {
                 entries: entries
             )
         else {
-            return (false, false)
+            return (false, false, 0)
         }
 
         let destinationMatches = entries
@@ -202,12 +242,14 @@ actor WordReplacementStore {
             .sorted(by: destinationOrder)
         let canonical = destinationMatches.first
 
+        let sourceVariantCount: Int
         if let canonical {
             // Auto Learn only adds the learned source without rewriting rows,
             // allowing Undo to remove exactly what was added.
             var variants = WordReplacementVariants.parse(canonical.originalText)
             variants.append(source)
             canonical.originalText = WordReplacementVariants.serialize(variants)
+            sourceVariantCount = WordReplacementVariants.parse(canonical.originalText).count
         } else {
             let entry = WordReplacement(
                 originalText: WordReplacementVariants.serialize([source]),
@@ -215,10 +257,11 @@ actor WordReplacementStore {
             )
             modelContext.insert(entry)
             entries.append(entry)
+            sourceVariantCount = 1
         }
 
         existingSourceKeys.insert(sourceKey)
-        return (canonical == nil, canonical != nil)
+        return (canonical == nil, canonical != nil, sourceVariantCount)
     }
 
     private func destinationOrder(_ lhs: WordReplacement, _ rhs: WordReplacement) -> Bool {

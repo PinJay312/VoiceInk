@@ -37,6 +37,12 @@ actor AutoLearnService {
         self.reviewer = reviewer
         observeProviderAvailability()
         do {
+            let promotedCount = try await store.promoteRepeatedReplacementDestinationsToVocabulary()
+            if promotedCount > 0 {
+                logger.notice(
+                    "Promoted \(promotedCount, privacy: .public) repeated replacement destination(s) to Vocabulary"
+                )
+            }
             try await pendingQueue.recoverInterruptedReviews()
             await notifyQueueChanged()
             await schedulePendingReview()
