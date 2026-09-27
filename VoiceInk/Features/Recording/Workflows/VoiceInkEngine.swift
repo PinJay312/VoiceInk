@@ -293,7 +293,9 @@ class VoiceInkEngine: NSObject, ObservableObject {
                                 return
                             }
 
-                            self.startRecordingContextCapture()
+                            self.startRecordingContextCapture(
+                                captureScreen: ModeManager.shared.currentEffectiveConfiguration?.useScreenCapture == true
+                            )
 
                             let modelResolution = ModeRuntimeResolver.transcriptionModelResolution(
                                 transcriptionModelManager: self.transcriptionModelManager
@@ -510,12 +512,12 @@ class VoiceInkEngine: NSObject, ObservableObject {
 
     // MARK: - Recording Context
 
-    private func startRecordingContextCapture() {
+    private func startRecordingContextCapture(captureScreen: Bool) {
         clearActiveRecordingContext()
 
         let store = RecordingContextSnapshotStore()
         activeRecordingContextStore = store
-        activeRecordingContextTasks = RecordingContextCaptureService.startCapture(into: store)
+        activeRecordingContextTasks = RecordingContextCaptureService.startCapture(into: store, captureScreen: captureScreen)
     }
 
     private func clearActiveRecordingContext() {

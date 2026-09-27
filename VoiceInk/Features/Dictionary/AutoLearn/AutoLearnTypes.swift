@@ -73,6 +73,7 @@ enum AutoLearnUnresolvedReason: String, Sendable {
     case conflictingDecisions
     case missingRequiredActionValues
     case invalidRequiredActionValues
+    case unsafeGlobalReplacement
 }
 
 struct AutoLearnUnresolvedReview: Sendable {
@@ -175,7 +176,7 @@ enum AutoLearnLimits {
     static let observationDurationNanoseconds: UInt64 = 60_000_000_000
     static let verificationDelayNanoseconds: UInt64 = 250_000_000
     static let samplingIntervalNanoseconds: UInt64 = 400_000_000
-    static let quiescenceDelayNanoseconds: UInt64 = 2_500_000_000
+    static let quiescenceDelayNanoseconds: UInt64 = 15_000_000_000
     static let focusChangeGraceNanoseconds: UInt64 = 250_000_000
     static let accessibilityTimeoutSeconds: Float = 0.50
     static let captureAccessibilityTimeoutSeconds: Float = 0.50

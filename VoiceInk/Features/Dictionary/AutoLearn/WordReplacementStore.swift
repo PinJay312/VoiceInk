@@ -184,6 +184,7 @@ actor WordReplacementStore {
         guard !source.isEmpty, !destination.isEmpty,
             !sourceKey.isEmpty, !destinationKey.isEmpty,
             source != destination,
+            AutoLearnReplacementSafety.isSafeAutomaticSource(source),
             !existingSourceKeys.contains(sourceKey),
             !wouldCreateCycle(
                 sourceKey: sourceKey,

@@ -31,9 +31,9 @@ final class AutoLearnKeyboardWatcher: @unchecked Sendable {
 
     /// Idle gap after the latest edit before the session is committed.
     /// Long enough to move to the next word, including an IME confirmation.
-    private static let quiescenceDelay: TimeInterval = 5.0
+    private static let quiescenceDelay: TimeInterval = 15.0
     /// Hard stop for one paste observation. Edits still present are committed.
-    private static let observationDeadline: TimeInterval = 30.0
+    private static let observationDeadline: TimeInterval = 60.0
 
     private init() {
         installTap()

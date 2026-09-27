@@ -42,6 +42,7 @@ class AIEnhancementService: ObservableObject {
         self.aiService = aiService
         self.modelContext = modelContext
         self.screenCaptureService = ScreenCaptureService()
+        ScreenCaptureService.prewarmOCR()
         self.customVocabularyService = CustomVocabularyService.shared
 
         if let savedPromptsData = UserDefaults.standard.data(forKey: "customPrompts"),

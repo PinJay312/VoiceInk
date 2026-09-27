@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import CoreText
 import Foundation
 import os
 import ScreenCaptureKit
@@ -17,12 +18,52 @@ class ScreenCaptureService: ObservableObject {
     }
 
     private static let captureTimeout: TimeInterval = 5.0
+    private static var didStartOCRPrewarm = false
     nonisolated private static let maximumCaptureDimension: CGFloat = 2800
     nonisolated private static let focusedWindowFrameTolerance: CGFloat = 96
     nonisolated private static let logger = Logger(
         subsystem: "com.prakashjoshipax.voiceink",
         category: "ScreenCapture"
     )
+
+    /// Warm Vision with synthetic text so first real dictation does not pay a
+    /// potentially long model initialization cost. No user screen data is read.
+    static func prewarmOCR() {
+        guard !didStartOCRPrewarm else { return }
+        didStartOCRPrewarm = true
+        Task.detached(priority: .utility) {
+            guard let image = Self.syntheticOCRImage() else { return }
+            let started = Date()
+            _ = Self.extractText(from: image)
+            let elapsedMs = Int(Date().timeIntervalSince(started) * 1000)
+            Self.logger.notice("OCR prewarm finished elapsedMs=\(elapsedMs, privacy: .public)")
+        }
+    }
+
+    nonisolated private static func syntheticOCRImage() -> CGImage? {
+        let width = 900
+        let height = 180
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        let font = CTFontCreateWithName("PingFang TC" as CFString, 56, nil)
+        let attributes = [NSAttributedString.Key(rawValue: kCTFontAttributeName as String): font]
+        let text = NSAttributedString(string: "畫面測試詞：紫杉弧線", attributes: attributes)
+        let line = CTLineCreateWithAttributedString(text)
+        context.textPosition = CGPoint(x: 25, y: 60)
+        CTLineDraw(line, context)
+        return context.makeImage()
+    }
 
     static func requestScreenCapturePermissionRegistration() async -> Bool {
         if CGPreflightScreenCaptureAccess() {
@@ -310,7 +351,8 @@ class ScreenCaptureService: ObservableObject {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
-        request.automaticallyDetectsLanguage = true
+        request.recognitionLanguages = ["zh-Hant", "en-US"]
+        request.automaticallyDetectsLanguage = false
 
         let requestHandler = VNImageRequestHandler(cgImage: cgImage, options: [:])
 

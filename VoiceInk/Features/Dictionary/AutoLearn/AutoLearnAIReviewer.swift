@@ -290,6 +290,10 @@ final class AutoLearnAIReviewer: @unchecked Sendable {
             return (nil, .invalidRequiredActionValues)
         }
 
+        guard AutoLearnReplacementSafety.isSafeAutomaticSource(incorrectTextToReplace) else {
+            return (nil, .unsafeGlobalReplacement)
+        }
+
         if differsOnlyByLetterCase(incorrectTextToReplace, correctedVocabularyTerm) {
             return (
                 AutoLearnReviewDecision(
@@ -466,6 +470,7 @@ final class AutoLearnAIReviewer: @unchecked Sendable {
 
         3. Mandatory personal-name rule:
            - A personal name is one indivisible term. For a visible multiword personal name, incorrectTextToReplace and correctedVocabularyTerm must contain every visible name component. If only one component (e.g., first name or surname) changed or is visible, use addReplacementOnly rather than Vocabulary.
+           - NEVER output a one-character Chinese, Japanese, Korean, or Thai incorrectTextToReplace. Expand both fields to the complete visible name or term, such as 邱鴻瑋 → 邱紘瑋. If the complete source term cannot be grounded exactly in originalText, use addVocabularyOnly with the complete corrected name when visible; otherwise rejectCorrection.
 
         Rejection Criteria (rejectCorrection):
         - Semantic rewrites with completely unrelated pronunciation (e.g., "今天吃蘋果" → "今天吃香蕉", "星期一" → "星期五", "台北" → "高雄" - words that do not sound alike at all and merely change factual meaning or preference).
@@ -484,6 +489,7 @@ final class AutoLearnAIReviewer: @unchecked Sendable {
         - Each array object must contain exactly: candidateID, learningAction, incorrectTextToReplace, correctedVocabularyTerm.
         - incorrectTextToReplace must be an exact nonempty contiguous substring of originalText.
         - correctedVocabularyTerm must be copied exactly from correctedText.
+        - A replacement source from Chinese, Japanese, Korean, or Thai must contain at least two characters. Never create a global single-character replacement for these scripts.
         - For addVocabularyOnly set incorrectTextToReplace to null.
         - For rejectCorrection set both fields to null.
         - If one candidate contains several separate homophone, near-homophone, or typo corrections, output one decision object per correction. Do not stop after the first correction. Every object uses that same candidateID, and the pairs must be distinct non-overlapping substrings. Do not emit rejectCorrection for the unchanged remainder of that candidate. Emit a single rejectCorrection only when the candidate contains no speech-to-text correction at all.

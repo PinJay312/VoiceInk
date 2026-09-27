@@ -30,7 +30,7 @@ final class WordReplacementService {
 
     func applyReplacements(to text: String, using context: ModelContext) -> String {
         // `isEnabled` is retained only for store and CloudKit compatibility.
-        // Replacement rules are intentionally always active.
+        // Runtime safety policy still excludes globally unsafe triggers.
         let descriptor = FetchDescriptor<WordReplacement>()
 
         let replacements: [WordReplacement]
@@ -143,6 +143,13 @@ final class WordReplacementService {
         // Preserve every legacy rule. New dictionary mutations prevent source
         // conflicts, but older stores may contain multiple rules for a trigger.
         let prepared = sortedRules.compactMap { rule -> PreparedRule? in
+            guard AutoLearnReplacementSafety.isSafeAutomaticSource(rule.original) else {
+                logger.warning(
+                    "Skipping unsafe single-character compact-script replacement source: \(rule.original, privacy: .private)"
+                )
+                return nil
+            }
+
             guard usesWordBoundaries(for: rule.original) else {
                 return PreparedRule(original: rule.original, replacement: rule.replacement, regex: nil)
             }

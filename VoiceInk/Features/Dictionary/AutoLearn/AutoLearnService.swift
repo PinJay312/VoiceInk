@@ -421,8 +421,8 @@ actor AutoLearnService {
             } else if let lastEdit = lastObservedEditTimestamp,
                 now - lastEdit >= AutoLearnLimits.quiescenceDelayNanoseconds {
                 // Quiescence detection:
-                // User finished editing and stopped typing for 2.5s. Finalize and learn immediately!
-                logger.notice("Auto Learn: quiescence reached (no edits for 2.5s), finalizing session")
+                // Finalize after a longer idle interval so separate word corrections stay in one session.
+                logger.notice("Auto Learn: quiescence reached, finalizing session")
                 await completeSession(token: token, persist: true, fallbackFinalText: liveText)
                 return true
             }
