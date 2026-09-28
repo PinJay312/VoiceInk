@@ -4,9 +4,32 @@ import SwiftData
 @ModelActor
 actor WordReplacementStore {
     private enum MutationError: Error { case invalidReplacementSource }
+
+    func knownVocabularyReplacementIndexes(
+        in decisions: [AutoLearnReviewDecision]
+    ) throws -> Set<Int> {
+        let vocabularyKeys = Set(
+            try modelContext.fetch(FetchDescriptor<VocabularyWord>()).map {
+                WordReplacementVariants.key(for: $0.word)
+            }
+        )
+
+        return Set(decisions.enumerated().compactMap { index, decision in
+            guard decision.learningAction == .addReplacementAndVocabulary
+                    || decision.learningAction == .addReplacementOnly,
+                let source = decision.incorrectTextToReplace,
+                let destination = decision.correctedVocabularyTerm,
+                vocabularyKeys.contains(WordReplacementVariants.key(for: source)),
+                vocabularyKeys.contains(WordReplacementVariants.key(for: destination))
+            else { return nil }
+            return index
+        })
+    }
+
     func apply(
         _ decisions: [AutoLearnReviewDecision],
-        candidates: [AutoLearnReviewCandidate]
+        candidates: [AutoLearnReviewCandidate],
+        allowKnownVocabularyReplacement: Bool = false
     ) throws -> AutoLearnMutationSummary {
         guard !decisions.isEmpty else { return .empty }
 
@@ -42,29 +65,45 @@ actor WordReplacementStore {
 
                     let mutation: (created: Bool, updated: Bool, sourceVariantCount: Int)
                     let explicitlyAddsVocabulary: Bool
+                    let sourceIsKnownVocabulary = decision.incorrectTextToReplace.map {
+                        vocabularyKeys.contains(WordReplacementVariants.key(for: $0))
+                    } ?? false
+                    let destinationIsKnownVocabulary = vocabularyKeys.contains(
+                        WordReplacementVariants.key(for: correctedVocabularyTerm)
+                    )
+                    let blocksAmbiguousKnownTerms = !allowKnownVocabularyReplacement
+                        && sourceIsKnownVocabulary
+                        && destinationIsKnownVocabulary
                     switch decision.learningAction {
                     case .addReplacementAndVocabulary:
                         explicitlyAddsVocabulary = true
                         guard let incorrectTextToReplace = decision.incorrectTextToReplace else {
                             continue
                         }
-                        mutation = try applyReplacement(
-                            source: incorrectTextToReplace,
-                            destination: correctedVocabularyTerm,
-                            entries: &entries,
-                            existingSourceKeys: &existingSourceKeys
-                        )
+                        mutation = blocksAmbiguousKnownTerms
+                            ? (false, false, 0)
+                            : try applyReplacement(
+                                source: incorrectTextToReplace,
+                                destination: correctedVocabularyTerm,
+                                entries: &entries,
+                                existingSourceKeys: &existingSourceKeys
+                            )
                     case .addReplacementOnly:
-                        explicitlyAddsVocabulary = false
+                        // If both sides are already canonical vocabulary terms,
+                        // a global replacement would destroy valid dictation.
+                        // Keep the vocabulary and let context disambiguate it.
+                        explicitlyAddsVocabulary = blocksAmbiguousKnownTerms
                         guard let incorrectTextToReplace = decision.incorrectTextToReplace else {
                             continue
                         }
-                        mutation = try applyReplacement(
-                            source: incorrectTextToReplace,
-                            destination: correctedVocabularyTerm,
-                            entries: &entries,
-                            existingSourceKeys: &existingSourceKeys
-                        )
+                        mutation = blocksAmbiguousKnownTerms
+                            ? (false, false, 0)
+                            : try applyReplacement(
+                                source: incorrectTextToReplace,
+                                destination: correctedVocabularyTerm,
+                                entries: &entries,
+                                existingSourceKeys: &existingSourceKeys
+                            )
                     case .addVocabularyOnly:
                         explicitlyAddsVocabulary = true
                         mutation = (false, false, 0)

@@ -467,6 +467,7 @@ final class AutoLearnAIReviewer: @unchecked Sendable {
 
         2. Technical, Software, Brand, and Proper Names:
            - Technologies, libraries, tools, brands, and domain-specific terms (e.g., GitHub, React, Docker, Python, Xcode, Whisper, Claude, Gemini, macOS, Notion) and user project names are valid and encouraged to learn. If speech recognition misrecognized or mangled them, accept as addReplacementAndVocabulary or addReplacementOnly.
+           - When both the original and corrected terms are independently valid brands, products, technical terms, names, or ordinary words, do NOT create a global replacement between them. Use addVocabularyOnly for the intended corrected term and let sentence context disambiguate future speech. Example: Garmin and Gemini are both valid product names, so never learn Garmin → Gemini or Gemini → Garmin as a replacement.
 
         3. Mandatory personal-name rule:
            - A personal name is one indivisible term. For a visible multiword personal name, incorrectTextToReplace and correctedVocabularyTerm must contain every visible name component. If only one component (e.g., first name or surname) changed or is visible, use addReplacementOnly rather than Vocabulary.
@@ -481,7 +482,7 @@ final class AutoLearnAIReviewer: @unchecked Sendable {
         Learning Actions:
         1. addReplacementAndVocabulary: The corrected term is a distinctive proper noun, personal name, brand, product, tech term, or domain term, and the original plausibly sounds like it.
         2. addReplacementOnly: Use for speech-to-text phonetic/homophone misrecognitions (especially Chinese homophones/near-homophones like 點書→點數, 本期→本機, 一者→一則, 勾語→口語, or partial personal names). The original sounds like the corrected term, and the substitution is safe to apply whenever that misrecognition occurs.
-        3. addVocabularyOnly: The corrected term is a specialized term/name that should be recognized by the speech model, but the source error is too broad/ambiguous for a global replacement rule.
+        3. addVocabularyOnly: The corrected term is a specialized term/name that should be recognized by the speech model, but the source error is too broad/ambiguous for a global replacement rule, or both source and destination are independently valid terms.
         4. rejectCorrection: The edit shares no phonetic or homophonic resemblance (pure semantic rewrite), or is grammar/style rephrasing, or case-only change.
 
         Output Requirements:

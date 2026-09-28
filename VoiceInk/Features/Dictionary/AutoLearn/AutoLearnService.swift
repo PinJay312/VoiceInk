@@ -167,7 +167,11 @@ actor AutoLearnService {
             )
         }
         guard !decisions.isEmpty else { return .empty }
-        let summary = try await replacementStore.apply(decisions, candidates: candidates)
+        let summary = try await replacementStore.apply(
+            decisions,
+            candidates: candidates,
+            allowKnownVocabularyReplacement: true
+        )
         try await reviewProposalStore.remove(Set(proposals.map(\.id)))
         await notifyReviewProposalsChanged()
 
@@ -696,13 +700,44 @@ actor AutoLearnService {
                 return
             }
 
+            let manualReviewIndexes = try await replacementStore
+                .knownVocabularyReplacementIndexes(in: reviewResult.reviewDecisions)
+            let automaticDecisions = reviewResult.reviewDecisions.enumerated().compactMap {
+                index, decision in
+                manualReviewIndexes.contains(index) ? nil : decision
+            }
+            let manualReviewDecisions = reviewResult.reviewDecisions.enumerated().compactMap {
+                index, decision -> AutoLearnReviewDecision? in
+                guard manualReviewIndexes.contains(index) else { return nil }
+                // Show both controls in Review Corrections. Vocabulary is the
+                // safe default; Replacement remains an explicit user override.
+                return AutoLearnReviewDecision(
+                    candidateID: decision.candidateID,
+                    learningAction: .addReplacementAndVocabulary,
+                    incorrectTextToReplace: decision.incorrectTextToReplace,
+                    correctedVocabularyTerm: decision.correctedVocabularyTerm
+                )
+            }
+            if !manualReviewDecisions.isEmpty {
+                try await reviewProposalStore.append(
+                    decisions: manualReviewDecisions,
+                    candidates: candidates
+                )
+            }
+
             let summary = try await replacementStore.apply(
-                reviewResult.reviewDecisions,
+                automaticDecisions,
                 candidates: candidates
             )
             try await pendingQueue.remove(candidateIDs)
             releaseClaim(candidateIDs)
             await notifyQueueChanged()
+            if !manualReviewDecisions.isEmpty {
+                await notifyReviewProposalsChanged()
+                logger.notice(
+                    "Auto Learn deferred ambiguous known-vocabulary replacements to manual review count=\(manualReviewDecisions.count, privacy: .public)"
+                )
+            }
             // Cleared only after the queue and dictionary are consistent, so a
             // failure in this block still surfaces to the user.
             AutoLearnSettings.clearFailure()

@@ -126,6 +126,7 @@ enum AIProvider: String, CaseIterable {
             ]
         case .openAI:
             return [
+                "gpt-6-luna",
                 "gpt-5.6-luna",
                 "gpt-5.6-terra",
                 "gpt-5.6-sol",
