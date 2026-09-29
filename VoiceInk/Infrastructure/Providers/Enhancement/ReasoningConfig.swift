@@ -84,13 +84,17 @@ struct ReasoningConfig {
         return nil
     }
 
-    // Provider-specific body params for hiding reasoning.
+    // Provider-specific body params for hiding reasoning, plus OpenAI Fast mode.
     static func getExtraBodyParameters(for provider: AIProvider, modelName: String) -> [String: Any]? {
+        var extra: [String: Any] = [:]
         if provider == .cerebras && modelName == "gpt-oss-120b" {
-            return ["reasoning_format": "hidden"]
+            extra["reasoning_format"] = "hidden"
         } else if provider == .groq && (modelName == "openai/gpt-oss-120b" || modelName == "openai/gpt-oss-20b") {
-            return ["include_reasoning": false]
+            extra["include_reasoning"] = false
         }
-        return nil
+        if provider == .openAI {
+            extra["service_tier"] = "fast"
+        }
+        return extra.isEmpty ? nil : extra
     }
 }
